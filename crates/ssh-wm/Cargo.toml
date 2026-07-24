@@ -1,0 +1,10 @@
+[package]
+name = "ssh-wm"
+description = "Window manager: pane tree, focus, and layouts for ssh-desk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+uuid = { workspace = true }

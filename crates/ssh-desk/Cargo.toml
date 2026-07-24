@@ -1,0 +1,23 @@
+[package]
+name = "ssh-desk"
+description = "Terminal OS shell over SSH — desktop TUI for remote work"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ssh-desk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+ssh-core = { workspace = true }
+ssh-os = { workspace = true }
+ssh-vault = { workspace = true }
+ssh-wm = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

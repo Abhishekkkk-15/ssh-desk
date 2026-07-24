@@ -1,0 +1,12 @@
+[package]
+name = "ssh-os"
+description = "OS services: clipboard, drag-drop, mime/open for ssh-desk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arboard = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
