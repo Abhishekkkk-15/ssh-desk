@@ -16,12 +16,13 @@ use crossterm::terminal::{
 };
 use ratatui::DefaultTerminal;
 use ssh_core::{join_remote, SessionEvent, SessionHub};
-use ssh_os::{Clipboard, FileEntry, FileLocation, FileOp};
+use ssh_os::{Clipboard, DragPayload, DragSession, DropTarget, FileEntry, FileLocation, FileOp};
 use ssh_vault::{HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
 
-use crate::files::{resolve_open_path, FilesState, ViewerState};
+use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
+use crate::hit::{self, FrameGeo};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
 
@@ -49,8 +50,23 @@ pub struct App {
     transfers: TransfersUi,
     path_prompt: Option<PathPrompt>,
     pending_files_refresh: bool,
+    /// Last computed layout for mouse hit-testing.
+    last_geo: Option<FrameGeo>,
+    /// Mouse press awaiting drag threshold.
+    mouse_press: Option<MousePress>,
+    drag: Option<DragSession>,
+    drop_target: Option<DropTarget>,
+    pending_drop: Option<PendingDrop>,
+    pending_open_parent: bool,
     should_quit: bool,
     connect_in_flight: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MousePress {
+    origin: (u16, u16),
+    /// Entry indices to drag (into files.entries).
+    entry_indices: Vec<usize>,
 }
 
 impl App {
@@ -80,6 +96,12 @@ impl App {
             transfers: TransfersUi::default(),
             path_prompt: None,
             pending_files_refresh: false,
+            last_geo: None,
+            mouse_press: None,
+            drag: None,
+            drop_target: None,
+            pending_drop: None,
+            pending_open_parent: false,
             should_quit: false,
             connect_in_flight: false,
         }
@@ -299,8 +321,15 @@ impl App {
             .map(|d| d.focused_app())
             .unwrap_or(AppKind::Terminal);
 
-        // Esc: clear file marks → close viewer → launcher
+        // Esc: cancel drag → clear marks → close viewer → launcher
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            if self.drag.is_some() {
+                self.drag = None;
+                self.drop_target = None;
+                self.mouse_press = None;
+                self.status = "drag cancelled".into();
+                return Ok(());
+            }
             if focused == AppKind::Files && !self.files.marked.is_empty() {
                 self.files.clear_marks();
                 self.status = "selection cleared".into();
@@ -309,7 +338,6 @@ impl App {
             if focused == AppKind::Viewer && self.viewer.is_open() {
                 self.viewer.clear();
                 if let Some(desktop) = self.desktop.as_mut() {
-                    // Prefer returning focus to Files
                     if let Some((id, _)) = desktop
                         .tree
                         .leaves()
@@ -533,6 +561,11 @@ impl App {
     }
 
     async fn clipboard_paste_into_remote(&mut self) -> Result<()> {
+        let dest = self.files.cwd.clone();
+        self.paste_clipboard_into(dest, false).await
+    }
+
+    async fn paste_clipboard_into(&mut self, dest_dir: PathBuf, force_move: bool) -> Result<()> {
         if !self.files.online {
             self.status = "paste needs a live SFTP session".into();
             return Ok(());
@@ -541,14 +574,16 @@ impl App {
             self.status = "no session".into();
             return Ok(());
         };
-        let op = self.clipboard.file_op().unwrap_or(FileOp::Copy);
+        let mut op = self.clipboard.file_op().unwrap_or(FileOp::Copy);
+        if force_move {
+            op = FileOp::Cut;
+        }
         let entries = self.clipboard.files().to_vec();
         if entries.is_empty() {
             self.status = "clipboard empty · Ctrl+C / Ctrl+L first".into();
             return Ok(());
         }
 
-        let dest_dir = self.files.cwd.clone();
         let mut queued = 0usize;
         let mut moved = 0usize;
         let mut skipped = 0usize;
@@ -615,23 +650,15 @@ impl App {
             }
         }
 
-        if op == FileOp::Cut && moved > 0 {
-            self.clipboard.clear_files();
-        }
-        // Cut uploads clear after successful transfer via delete_local_after;
-        // clear clipboard now for cut remotes that were renamed.
-        if op == FileOp::Cut && queued == 0 && moved > 0 {
-            self.clipboard.clear_files();
-        }
-        if op == FileOp::Cut && queued > 0 {
-            // Keep clipboard until transfers finish would be nicer; clear to avoid double paste.
+        if op == FileOp::Cut {
             self.clipboard.clear_files();
         }
 
         self.files.clear_marks();
         self.pending_files_refresh = true;
         self.status = format!(
-            "paste · {moved} moved · {queued} queued · {skipped} skipped"
+            "paste · {moved} moved · {queued} queued · {skipped} skipped → {}",
+            dest_dir.display()
         );
         Ok(())
     }
@@ -938,13 +965,170 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if mouse.kind == MouseEventKind::Down(event::MouseButton::Left) {
+        // Mouse handling is sync; drop completion is polled via flags set here.
+        // Actual paste runs from event_loop when `pending_drop` is set.
+        let _ = self.handle_mouse_inner(mouse);
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> Result<()> {
+        if self.desktop.is_none() || self.last_geo.is_none() {
+            return Ok(());
+        }
+        let geo = self.last_geo.as_ref().unwrap();
+
+        let pos = (mouse.column, mouse.row);
+        let mods = mouse.modifiers;
+
+        match mouse.kind {
+            MouseEventKind::Down(event::MouseButton::Left) => {
+                if let Some(pane) = geo.pane_at(pos.0, pos.1) {
+                    let id = pane.id;
+                    if let Some(desktop) = self.desktop.as_mut() {
+                        desktop.tree.set_focus(id);
+                    }
+                }
+
+                if let Some(row) = geo.files_row_at(pos.0, pos.1) {
+                    if let Some(entry_idx) = row.entry_index {
+                        self.files.selected = row.row_index;
+                        let indices = if self.files.is_marked(entry_idx) {
+                            self.files.marked.clone()
+                        } else {
+                            vec![entry_idx]
+                        };
+                        self.mouse_press = Some(MousePress {
+                            origin: pos,
+                            entry_indices: indices,
+                        });
+                    } else {
+                        self.files.selected = row.row_index;
+                        self.mouse_press = Some(MousePress {
+                            origin: pos,
+                            entry_indices: Vec::new(),
+                        });
+                    }
+                } else {
+                    self.mouse_press = None;
+                }
+            }
+            MouseEventKind::Drag(event::MouseButton::Left) => {
+                if let Some(press) = self.mouse_press.clone() {
+                    let dx = pos.0.abs_diff(press.origin.0);
+                    let dy = pos.1.abs_diff(press.origin.1);
+                    if self.drag.is_none() && (dx >= 1 || dy >= 1) && !press.entry_indices.is_empty()
+                    {
+                        let Some(host_id) = self.active_host_id.clone() else {
+                            return Ok(());
+                        };
+                        let files: Vec<FileEntry> = press
+                            .entry_indices
+                            .iter()
+                            .filter_map(|i| self.files.entries.get(*i))
+                            .map(|e| FileEntry::remote(&host_id, e.path.clone(), e.is_dir))
+                            .collect();
+                        if files.is_empty() {
+                            return Ok(());
+                        }
+                        let n = files.len();
+                        self.drag =
+                            Some(DragSession::start(DragPayload::Files(files), press.origin));
+                        self.status =
+                            format!("dragging {n} · drop on folder (Shift=move) · Esc cancel");
+                    }
+                }
+                if let Some(drag) = self.drag.as_mut() {
+                    drag.move_to(pos);
+                }
+                let cwd = self.files.cwd.clone();
+                if let Some(geo) = self.last_geo.as_ref() {
+                    self.drop_target = Some(geo.drop_target_at(pos.0, pos.1, &cwd));
+                    if let Some(t) = &self.drop_target {
+                        let move_hint = if mods.contains(KeyModifiers::SHIFT) {
+                            "move"
+                        } else {
+                            "copy"
+                        };
+                        self.status = format!("{} · {move_hint}", t.describe());
+                    }
+                }
+            }
+            MouseEventKind::Up(event::MouseButton::Left) => {
+                let force_move = mods.contains(KeyModifiers::SHIFT);
+                if let Some(drag) = self.drag.take() {
+                    let target = self.drop_target.take().unwrap_or(DropTarget::Ask);
+                    self.mouse_press = None;
+                    self.pending_drop = Some(PendingDrop {
+                        payload: drag.payload,
+                        target,
+                        force_move,
+                    });
+                } else if let Some(press) = self.mouse_press.take() {
+                    if press.entry_indices.is_empty() {
+                        if let Some(FilesRow::Parent) = self.files.selected_row() {
+                            self.pending_open_parent = true;
+                        }
+                    }
+                }
+                self.drop_target = None;
+            }
+            MouseEventKind::Moved => {
+                if self.drag.is_some() {
+                    if let Some(drag) = self.drag.as_mut() {
+                        drag.move_to(pos);
+                    }
+                    let cwd = self.files.cwd.clone();
+                    if let Some(geo) = self.last_geo.as_ref() {
+                        self.drop_target = Some(geo.drop_target_at(pos.0, pos.1, &cwd));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn apply_pending_drop(&mut self) -> Result<()> {
+        let Some(pending) = self.pending_drop.take() else {
+            return Ok(());
+        };
+        let DragPayload::Files(files) = pending.payload else {
+            self.status = "OS path drops arrive in Phase 6".into();
+            return Ok(());
+        };
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        let dest = match &pending.target {
+            DropTarget::Folder { path, .. } => path.clone(),
+            DropTarget::TransferDock => self.files.cwd.clone(),
+            DropTarget::Ask => {
+                self.status = "drop cancelled · no target".into();
+                return Ok(());
+            }
+        };
+
+        let op = if pending.force_move {
+            FileOp::Cut
+        } else {
+            FileOp::Copy
+        };
+        self.clipboard.set_files(files, op);
+        self.paste_clipboard_into(dest, pending.force_move).await?;
+
+        if matches!(pending.target, DropTarget::TransferDock) {
             if let Some(desktop) = self.desktop.as_mut() {
-                let _ = mouse;
-                desktop.focus_next();
-                self.status = format!("focus → {}", desktop.focused_app().label());
+                if let Some((tid, _)) = desktop
+                    .tree
+                    .leaves()
+                    .into_iter()
+                    .find(|(_, a)| *a == AppKind::Transfers)
+                {
+                    desktop.tree.set_focus(tid);
+                }
             }
         }
+        Ok(())
     }
 
     fn frame_model(&self) -> UiFrame<'_> {
@@ -968,8 +1152,17 @@ impl App {
             viewer: &self.viewer,
             transfers: &self.transfers,
             path_prompt: self.path_prompt.as_ref(),
+            drag: self.drag.as_ref(),
+            drop_target: self.drop_target.as_ref(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingDrop {
+    payload: DragPayload,
+    target: DropTarget,
+    force_move: bool,
 }
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
@@ -1021,6 +1214,33 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
             let cwd = app.files.cwd.clone();
             let _ = app.load_dir(cwd).await;
         }
+        if app.pending_open_parent {
+            app.pending_open_parent = false;
+            if app.files.cwd != PathBuf::from("/") {
+                let parent = join_remote(&app.files.cwd, "..");
+                if app.files.online {
+                    let _ = app.load_dir(parent).await;
+                } else {
+                    app.files = FilesState::demo();
+                }
+            }
+        }
+        app.apply_pending_drop().await?;
+
+        let area = terminal.size().map(|s| {
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: s.width,
+                height: s.height,
+            }
+        })?;
+        if let Some(desktop) = app.desktop.as_ref() {
+            app.last_geo = Some(hit::compute_frame_geo(area, desktop, &app.files));
+        } else {
+            app.last_geo = None;
+        }
+
         terminal.draw(|frame| ui::draw(frame, &app.frame_model()))?;
 
         if app.should_quit {

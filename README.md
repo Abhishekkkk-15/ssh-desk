@@ -6,27 +6,23 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **4** complete:
+Phase **5** complete:
 
-- Desktop WM, vault, SSH/PTY, SFTP Files + Viewer
-- Transfer queue with upload/download
-- **File clipboard** — multi-select, copy/cut/paste local↔remote
+- In-TUI drag-and-drop: drag files onto folders / transfers dock
+- Yellow drop highlights + ghost label (Shift+drop = move)
+- File clipboard, transfer queue, SFTP Files + Viewer
+
+## Drag & drop
+
+1. Mouse-down on a file (or marked selection) in Files  
+2. Drag onto a directory row, Files pane, or Transfers/dock  
+3. Release to copy · hold **Shift** to move · **Esc** cancels  
 
 ## Build
 
 ```bash
-cargo build -p ssh-desk
 cargo run -p ssh-desk
 ```
-
-## Keys
-
-| Context | Binding |
-|---------|---------|
-| Files | `Space` mark, `Ctrl+C` copy, `Ctrl+X` cut, `Ctrl+V` paste into cwd |
-| Files | `Ctrl+L` copy local file onto clipboard, `Ctrl+Shift+V` paste remote→~/Downloads |
-| Files | `Ctrl+U`/`Ctrl+D` upload/download picker |
-| Transfers | `j/k` select, `c` cancel, `r` retry |
 
 ## Layout
 

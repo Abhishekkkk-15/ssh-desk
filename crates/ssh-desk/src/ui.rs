@@ -1,10 +1,13 @@
 //! ratatui views for launcher and desktop OS shell.
 
+use std::path::PathBuf;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use ssh_os::{DragPayload, DragSession, DropTarget};
 use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
@@ -30,6 +33,8 @@ pub struct UiFrame<'a> {
     pub viewer: &'a ViewerState,
     pub transfers: &'a TransfersUi,
     pub path_prompt: Option<&'a PathPrompt>,
+    pub drag: Option<&'a DragSession>,
+    pub drop_target: Option<&'a DropTarget>,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -57,6 +62,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     draw_status(frame, chunks[3], model);
     if let Some(prompt) = model.path_prompt {
         draw_path_prompt(frame, area, prompt);
+    }
+    if let Some(drag) = model.drag {
+        draw_drag_ghost(frame, drag, model.drop_target);
     }
 }
 
@@ -164,7 +172,10 @@ fn draw_pane(
     match node {
         PaneNode::Leaf { id, app } => {
             let focused = *id == desktop.tree.focused();
-            let border = if focused {
+            let drop_hot = pane_is_drop_hot(*app, model.drop_target);
+            let border = if drop_hot {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else if focused {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
@@ -210,6 +221,14 @@ fn draw_pane(
     }
 }
 
+fn pane_is_drop_hot(app: AppKind, target: Option<&DropTarget>) -> bool {
+    match (app, target) {
+        (AppKind::Files, Some(DropTarget::Folder { .. })) => true,
+        (AppKind::Transfers, Some(DropTarget::TransferDock)) => true,
+        _ => false,
+    }
+}
+
 fn ratio_constraints(ratio: f32) -> (Constraint, Constraint) {
     let a = ((ratio * 100.0).round() as u16).clamp(15, 85);
     let b = 100 - a;
@@ -238,7 +257,7 @@ fn draw_app_body(
                 area,
             );
         }
-        AppKind::Files => draw_files(frame, area, focused, model.files),
+        AppKind::Files => draw_files(frame, area, focused, model.files, model.drop_target),
         AppKind::Processes => {
             let lines = vec![
                 Line::from("PID   CPU  MEM  COMMAND"),
@@ -264,7 +283,18 @@ fn draw_app_body(
     }
 }
 
-fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesState) {
+fn draw_files(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    files: &FilesState,
+    drop_target: Option<&DropTarget>,
+) {
+    let drop_path = match drop_target {
+        Some(DropTarget::Folder { path, .. }) => Some(path.as_path()),
+        _ => None,
+    };
+
     let mut lines: Vec<Line> = Vec::new();
     if let Some(err) = &files.error {
         lines.push(Line::from(Span::styled(
@@ -281,8 +311,15 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
     let start = files.selected.saturating_sub(visible.saturating_sub(1));
 
     for (idx, row) in rows.iter().enumerate().skip(start).take(visible) {
-        let label = match row {
-            FilesRow::Parent => "../".to_string(),
+        let (label, row_path, is_dir) = match row {
+            FilesRow::Parent => {
+                let p = files
+                    .cwd
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                ("../".to_string(), Some(p), true)
+            }
             FilesRow::Entry(i) => files
                 .entries
                 .get(*i)
@@ -294,26 +331,40 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
                             name = format!("{name}  ({sz})");
                         }
                     }
-                    format!("{mark}{name}")
+                    (
+                        format!("{mark}{name}"),
+                        Some(e.path.clone()),
+                        e.is_dir,
+                    )
                 })
-                .unwrap_or_default(),
+                .unwrap_or_else(|| (String::new(), None, false)),
         };
         let selected = idx == files.selected;
-        let style = if selected && focused {
+        let is_drop = drop_path.is_some_and(|dp| row_path.as_ref().is_some_and(|rp| rp == dp));
+        let style = if is_drop {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if selected && focused {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else if selected {
             Style::default().fg(Color::Cyan)
-        } else if matches!(row, FilesRow::Entry(i) if files.entries.get(*i).is_some_and(|e| e.is_dir))
-            || matches!(row, FilesRow::Parent)
-        {
+        } else if is_dir {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default()
         };
-        let marker = if selected { "› " } else { "  " };
+        let marker = if is_drop {
+            "↳ "
+        } else if selected {
+            "› "
+        } else {
+            "  "
+        };
         lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
     }
 
@@ -323,7 +374,7 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
 
     if focused {
         lines.push(Line::from(Span::styled(
-            "Space mark · Ctrl+C/X/V clipboard · Ctrl+L local · Ctrl+U/D",
+            "drag files · Shift+drop move · Space mark · Ctrl+C/X/V",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -527,6 +578,56 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     );
 }
 
+fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&DropTarget>) {
+    let label = match &drag.payload {
+        DragPayload::Files(files) => {
+            let name = files
+                .first()
+                .and_then(|f| match &f.location {
+                    ssh_os::FileLocation::Remote { path, .. }
+                    | ssh_os::FileLocation::Local { path } => path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned()),
+                })
+                .unwrap_or_else(|| "file".into());
+            if files.len() > 1 {
+                format!(" {} (+{}) ", name, files.len() - 1)
+            } else {
+                format!(" {name} ")
+            }
+        }
+        DragPayload::OsPaths(paths) => format!(" {} path(s) ", paths.len()),
+    };
+    let hint = target.map(DropTarget::describe).unwrap_or_default();
+    let text = if hint.is_empty() {
+        label
+    } else {
+        format!("{label}→ {hint} ")
+    };
+
+    let width = (text.chars().count() as u16).clamp(8, 48);
+    let (x, y) = drag.current;
+    let area = frame.area();
+    let gx = x.min(area.width.saturating_sub(width));
+    let gy = y.min(area.height.saturating_sub(1));
+    let rect = Rect {
+        x: gx,
+        y: gy,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(text).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rect,
+    );
+}
+
 fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     if !viewer.is_open() {
         frame.render_widget(
@@ -570,7 +671,18 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         .map(|d| d.focused_app())
         .unwrap_or(AppKind::Launcher);
 
-    let mut spans = vec![Span::styled(" dock ", Style::default().fg(Color::DarkGray))];
+    let dock_hot = matches!(model.drop_target, Some(DropTarget::TransferDock));
+    let mut spans = vec![Span::styled(
+        " dock ",
+        if dock_hot {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    )];
     for app in AppKind::all_dock() {
         let active = model.screen == ScreenKind::Desktop && focused == *app;
         let style = if active {

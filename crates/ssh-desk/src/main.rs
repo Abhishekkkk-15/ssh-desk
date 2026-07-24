@@ -2,6 +2,7 @@
 
 mod app;
 mod files;
+mod hit;
 mod transfers;
 mod ui;
 
