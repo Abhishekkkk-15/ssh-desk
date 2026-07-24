@@ -1,0 +1,20 @@
+# Design / planning exports (local only)
+cursor_advanced_ssh_tui_design.md
+
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets / local config
+.env
+*.pem
+*.key
+!crates/**/testdata/**
