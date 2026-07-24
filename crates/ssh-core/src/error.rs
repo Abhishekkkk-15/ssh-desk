@@ -12,6 +12,8 @@ pub enum CoreError {
     Closed,
     #[error("pty error: {0}")]
     Pty(String),
+    #[error("sftp error: {0}")]
+    Sftp(String),
     #[error("vault: {0}")]
     Vault(#[from] ssh_vault::VaultError),
     #[error("{0}")]

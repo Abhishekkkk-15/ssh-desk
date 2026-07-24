@@ -8,6 +8,8 @@ use ratatui::Frame;
 use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
+use crate::files::{FilesRow, FilesState, ViewerState};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenKind {
     Launcher,
@@ -22,6 +24,8 @@ pub struct UiFrame<'a> {
     pub status: &'a str,
     pub term_buffer: &'a str,
     pub clipboard_has_files: bool,
+    pub files: &'a FilesState,
+    pub viewer: &'a ViewerState,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -125,8 +129,8 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Line::from("Vault: ~/.config/ssh-desk/hosts.toml"),
         Line::from("Auth prefers ssh-agent, then private key."),
         Line::from(""),
-        Line::from("After connect you get a tiled desktop:"),
-        Line::from("  shell · files · processes · transfers"),
+        Line::from("After connect: tiled desktop with SFTP files."),
+        Line::from("  F2 files · Enter open · F6 viewer"),
         Line::from("Esc returns here from a session."),
     ])
     .block(
@@ -158,11 +162,23 @@ fn draw_pane(
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let title = format!(
-                " {}{} ",
-                app.label(),
-                if focused { " ●" } else { "" }
-            );
+            let title = match app {
+                AppKind::Files => format!(
+                    " files {}{} ",
+                    model.files.cwd_display(),
+                    if focused { " ●" } else { "" }
+                ),
+                AppKind::Viewer => format!(
+                    " viewer{}{} ",
+                    if model.viewer.is_open() {
+                        format!(" · {}", model.viewer.title)
+                    } else {
+                        String::new()
+                    },
+                    if focused { " ●" } else { "" }
+                ),
+                _ => format!(" {}{} ", app.label(), if focused { " ●" } else { "" }),
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(title)
@@ -205,7 +221,6 @@ fn draw_app_body(
             let text = if model.term_buffer.is_empty() {
                 "(empty shell)".into()
             } else {
-                // Show tail that fits.
                 let lines: Vec<&str> = model.term_buffer.lines().collect();
                 let max = area.height as usize;
                 let start = lines.len().saturating_sub(max);
@@ -216,26 +231,7 @@ fn draw_app_body(
                 area,
             );
         }
-        AppKind::Files => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    " /home  (remote · Phase 2 SFTP)",
-                    Style::default().fg(Color::Yellow),
-                )),
-                Line::from("  ../"),
-                Line::from("  bin/"),
-                Line::from("  etc/"),
-                Line::from("  var/www/"),
-                Line::from("  index.html"),
-                Line::from(""),
-                Line::from(if focused {
-                    "Enter open · Ctrl+C/V file clipboard · drag to transfer"
-                } else {
-                    "focus this pane to browse"
-                }),
-            ];
-            frame.render_widget(Paragraph::new(lines), area);
-        }
+        AppKind::Files => draw_files(frame, area, focused, model.files),
         AppKind::Processes => {
             let lines = vec![
                 Line::from("PID   CPU  MEM  COMMAND"),
@@ -260,12 +256,7 @@ fn draw_app_body(
             ];
             frame.render_widget(Paragraph::new(lines), area);
         }
-        AppKind::Viewer => {
-            frame.render_widget(
-                Paragraph::new("Open a file from Files to view it here."),
-                area,
-            );
-        }
+        AppKind::Viewer => draw_viewer(frame, area, model.viewer),
         AppKind::Editor => {
             frame.render_widget(
                 Paragraph::new("Text editor · save-back over SFTP in Phase 7."),
@@ -276,6 +267,109 @@ fn draw_app_body(
             frame.render_widget(Clear, area);
         }
     }
+}
+
+fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesState) {
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(err) = &files.error {
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if files.loading {
+        lines.push(Line::from("loading…"));
+    }
+
+    let rows = files.rows();
+    let visible = area.height as usize;
+    let start = files.selected.saturating_sub(visible.saturating_sub(1));
+
+    for (idx, row) in rows.iter().enumerate().skip(start).take(visible) {
+        let label = match row {
+            FilesRow::Parent => "../".to_string(),
+            FilesRow::Entry(i) => files
+                .entries
+                .get(*i)
+                .map(|e| {
+                    let mut name = e.display_name();
+                    if let Some(sz) = e.size {
+                        if !e.is_dir {
+                            name = format!("{name}  ({sz})");
+                        }
+                    }
+                    name
+                })
+                .unwrap_or_default(),
+        };
+        let selected = idx == files.selected;
+        let style = if selected && focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
+            Style::default().fg(Color::Cyan)
+        } else if matches!(row, FilesRow::Entry(i) if files.entries.get(*i).is_some_and(|e| e.is_dir))
+            || matches!(row, FilesRow::Parent)
+        {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        let marker = if selected { "› " } else { "  " };
+        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
+    }
+
+    if rows.is_empty() && !files.loading {
+        lines.push(Line::from("(empty directory)"));
+    }
+
+    if focused {
+        lines.push(Line::from(Span::styled(
+            "Enter open · Backspace up · r refresh",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
+    if !viewer.is_open() {
+        frame.render_widget(
+            Paragraph::new("Open a file from Files (Enter) to view it here.\nEsc closes."),
+            area,
+        );
+        return;
+    }
+
+    let mut header = format!("{}", viewer.title);
+    if viewer.binary {
+        header.push_str("  [hex]");
+    }
+    if viewer.truncated {
+        header.push_str("  [truncated]");
+    }
+
+    let body_lines: Vec<&str> = viewer.body.lines().collect();
+    let max = area.height.saturating_sub(1) as usize;
+    let start = (viewer.scroll as usize).min(body_lines.len().saturating_sub(1));
+    let slice = body_lines
+        .get(start..start.saturating_add(max).min(body_lines.len()))
+        .unwrap_or(&[]);
+
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for line in slice {
+        lines.push(Line::from(line.to_string()));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
@@ -311,7 +405,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "Enter connect · q quit",
         ScreenKind::Desktop => {
-            "Tab focus · F2-F5 apps · Ctrl+H/V split · Esc launcher · Ctrl+Q quit"
+            "Tab focus · F2 Files · F6 Viewer · Enter open · Esc · Ctrl+Q quit"
         }
     };
     let line = Line::from(vec![

@@ -1,0 +1,206 @@
+//! Files browser and Viewer state for the desktop shell.
+
+use std::path::{Path, PathBuf};
+
+use ssh_core::{join_remote, remote_path_string, RemoteEntry, RemoteFileContent};
+use ssh_os::{sniff_open_action, OpenAction};
+
+#[derive(Debug, Clone)]
+pub struct FilesState {
+    pub cwd: PathBuf,
+    pub entries: Vec<RemoteEntry>,
+    /// Index into `rows()` (includes synthetic `..` when not at root).
+    pub selected: usize,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub online: bool,
+}
+
+impl Default for FilesState {
+    fn default() -> Self {
+        Self {
+            cwd: PathBuf::from("/"),
+            entries: Vec::new(),
+            selected: 0,
+            loading: false,
+            error: None,
+            online: false,
+        }
+    }
+}
+
+impl FilesState {
+    pub fn demo() -> Self {
+        let cwd = PathBuf::from("/home/demo");
+        let entries = vec![
+            RemoteEntry {
+                name: "Documents".into(),
+                path: cwd.join("Documents"),
+                is_dir: true,
+                size: None,
+            },
+            RemoteEntry {
+                name: "notes.txt".into(),
+                path: cwd.join("notes.txt"),
+                is_dir: false,
+                size: Some(42),
+            },
+            RemoteEntry {
+                name: "readme.md".into(),
+                path: cwd.join("readme.md"),
+                is_dir: false,
+                size: Some(120),
+            },
+        ];
+        Self {
+            cwd,
+            entries,
+            selected: 0,
+            loading: false,
+            error: Some("offline · demo listing (connect for live SFTP)".into()),
+            online: false,
+        }
+    }
+
+    pub fn set_listing(&mut self, cwd: PathBuf, entries: Vec<RemoteEntry>) {
+        self.cwd = cwd;
+        self.entries = entries;
+        self.selected = 0;
+        self.loading = false;
+        self.error = None;
+        self.online = true;
+    }
+
+    pub fn rows(&self) -> Vec<FilesRow> {
+        let mut rows = Vec::new();
+        if self.cwd != Path::new("/") {
+            rows.push(FilesRow::Parent);
+        }
+        for (i, _) in self.entries.iter().enumerate() {
+            rows.push(FilesRow::Entry(i));
+        }
+        rows
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        let len = self.rows().len();
+        if len > 0 && self.selected + 1 < len {
+            self.selected += 1;
+        }
+    }
+
+    pub fn selected_row(&self) -> Option<FilesRow> {
+        self.rows().get(self.selected).copied()
+    }
+
+    pub fn cwd_display(&self) -> String {
+        remote_path_string(&self.cwd)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesRow {
+    Parent,
+    Entry(usize),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewerState {
+    pub path: Option<PathBuf>,
+    pub title: String,
+    pub body: String,
+    pub scroll: u16,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
+impl ViewerState {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.path.is_some()
+    }
+
+    pub fn from_content(content: RemoteFileContent) -> Self {
+        let path = content.path.clone();
+        let title = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| remote_path_string(&path));
+        let truncated = content.truncated;
+        let binary = content.looks_binary()
+            || matches!(
+                sniff_open_action(&path),
+                OpenAction::Hex | OpenAction::PreviewImage
+            );
+
+        let mut body = if binary {
+            content.hex_preview(4096)
+        } else {
+            content
+                .as_text()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| content.hex_preview(4096))
+        };
+
+        if truncated {
+            body.push_str("\n\n… truncated at 512 KiB …\n");
+        }
+
+        // Demo offline open for known demo files
+        Self {
+            path: Some(path),
+            title,
+            body,
+            scroll: 0,
+            binary: binary || content.as_text().is_none(),
+            truncated,
+        }
+    }
+
+    pub fn demo_file(path: &Path) -> Self {
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let body = match name.as_str() {
+            "notes.txt" => {
+                "Demo notes\n\nConnect over SSH to browse and open real remote files via SFTP.\n"
+                    .into()
+            }
+            "readme.md" => "# ssh-desk\n\nRemote OS shell in the terminal.\n\nOpen files from the Files pane.\n".into(),
+            _ => format!("(demo) contents of {name}\n"),
+        };
+        Self {
+            path: Some(path.to_path_buf()),
+            title: name,
+            body,
+            scroll: 0,
+            binary: false,
+            truncated: false,
+        }
+    }
+
+    pub fn scroll_by(&mut self, delta: i32) {
+        if delta < 0 {
+            self.scroll = self.scroll.saturating_sub((-delta) as u16);
+        } else {
+            self.scroll = self.scroll.saturating_add(delta as u16);
+        }
+    }
+}
+
+pub fn resolve_open_path(cwd: &Path, row: FilesRow, entries: &[RemoteEntry]) -> Option<(PathBuf, bool)> {
+    match row {
+        FilesRow::Parent => Some((join_remote(cwd, ".."), true)),
+        FilesRow::Entry(i) => entries.get(i).map(|e| (e.path.clone(), e.is_dir)),
+    }
+}

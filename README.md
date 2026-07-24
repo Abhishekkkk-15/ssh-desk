@@ -6,12 +6,13 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **0–1** scaffold:
+Phase **2** in progress:
 
 - Desktop window manager (split panes, focus, dock)
 - Host vault (`~/.config/ssh-desk`)
 - SSH connect + PTY via `russh` (agent / key / encrypted password)
-- Files / transfers / processes panes present as OS shell placeholders
+- **SFTP Files app** — browse remote dirs, open text/hex in Viewer
+- Transfers / processes panes still placeholders
 
 ## Build
 
@@ -25,7 +26,10 @@ cargo run -p ssh-desk
 | Context | Binding |
 |---------|---------|
 | Launcher | `Enter` connect, `j/k` select, `r` reload vault, `q` quit |
-| Desktop | `Tab` focus, `F2`–`F5` apps, `Ctrl+H`/`Ctrl+V` split, `Esc` launcher, `Ctrl+Q` quit |
+| Desktop | `Tab` focus, `F2` Files, `F3` Term, `F6` Viewer, `Ctrl+H`/`Ctrl+V` split |
+| Files | `j/k` move, `Enter` open/cd, `Backspace` parent, `r` refresh |
+| Viewer | `j/k` scroll, `Esc`/`q` close |
+| Global | `Esc` launcher (closes viewer first), `Ctrl+Q` quit |
 
 ## Layout
 

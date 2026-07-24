@@ -1,17 +1,19 @@
 //! Async SSH client wrapper around russh.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use russh::client::{self, Handle};
 use russh::keys::load_secret_key;
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::ChannelMsg;
+use russh_sftp::client::SftpSession;
 use ssh_vault::{AuthMethod, HostProfile, Vault};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use crate::error::CoreError;
+use crate::fs::{remote_path_string, RemoteEntry, RemoteFileContent};
 use crate::pty::{PtyId, PtyOutput, PtySession};
 
 /// Events pushed from the SSH task to the TUI.
@@ -49,6 +51,7 @@ struct SessionHandle {
     handle: Handle<ClientHandler>,
     pty: PtySession,
     pty_tx: mpsc::UnboundedSender<PtyCommand>,
+    sftp: Option<SftpSession>,
 }
 
 /// Manages SSH sessions for the desktop.
@@ -158,11 +161,14 @@ impl SessionHub {
             });
         });
 
+        let sftp = open_sftp(&handle).await?;
+
         let session = SessionHandle {
             host_id: profile.id.clone(),
             handle,
             pty,
             pty_tx,
+            sftp: Some(sftp),
         };
 
         self.sessions.lock().await.push(session);
@@ -177,6 +183,9 @@ impl SessionHub {
         let mut sessions = self.sessions.lock().await;
         if let Some(pos) = sessions.iter().position(|s| s.host_id == host_id) {
             let session = sessions.remove(pos);
+            if let Some(sftp) = &session.sftp {
+                let _ = sftp.close().await;
+            }
             let _ = session
                 .handle
                 .disconnect(russh::Disconnect::ByApplication, "", "")
@@ -224,6 +233,118 @@ impl SessionHub {
             .iter()
             .any(|s| s.host_id == host_id)
     }
+
+    pub async fn has_sftp(&self, host_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .any(|s| s.host_id == host_id && s.sftp.is_some())
+    }
+
+    /// Resolve `.` / relative paths to an absolute remote path.
+    pub async fn canonicalize(&self, host_id: &str, path: &str) -> Result<PathBuf, CoreError> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+        let sftp = session
+            .sftp
+            .as_ref()
+            .ok_or_else(|| CoreError::Sftp("sftp not available".into()))?;
+        let abs = sftp
+            .canonicalize(path)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        Ok(PathBuf::from(abs))
+    }
+
+    pub async fn list_dir(&self, host_id: &str, path: &Path) -> Result<Vec<RemoteEntry>, CoreError> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+        let sftp = session
+            .sftp
+            .as_ref()
+            .ok_or_else(|| CoreError::Sftp("sftp not available".into()))?;
+
+        let path_str = remote_path_string(path);
+        let dir = sftp
+            .read_dir(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+
+        let mut entries: Vec<RemoteEntry> = dir
+            .map(|entry| {
+                let is_dir = entry.file_type().is_dir();
+                let size = entry.metadata().size;
+                RemoteEntry {
+                    name: entry.file_name(),
+                    path: PathBuf::from(entry.path()),
+                    is_dir,
+                    size,
+                }
+            })
+            .collect();
+
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+
+        Ok(entries)
+    }
+
+    pub async fn read_file(
+        &self,
+        host_id: &str,
+        path: &Path,
+    ) -> Result<RemoteFileContent, CoreError> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+        let sftp = session
+            .sftp
+            .as_ref()
+            .ok_or_else(|| CoreError::Sftp("sftp not available".into()))?;
+
+        let path_str = remote_path_string(path);
+        let mut bytes = sftp
+            .read(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+
+        let truncated = bytes.len() > RemoteFileContent::MAX_BYTES;
+        if truncated {
+            bytes.truncate(RemoteFileContent::MAX_BYTES);
+        }
+
+        Ok(RemoteFileContent {
+            path: path.to_path_buf(),
+            bytes,
+            truncated,
+        })
+    }
+}
+
+async fn open_sftp(handle: &Handle<ClientHandler>) -> Result<SftpSession, CoreError> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))
 }
 
 async fn authenticate(
