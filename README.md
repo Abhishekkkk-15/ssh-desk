@@ -6,13 +6,11 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **2** in progress:
+Phase **3** complete:
 
-- Desktop window manager (split panes, focus, dock)
-- Host vault (`~/.config/ssh-desk`)
-- SSH connect + PTY via `russh` (agent / key / encrypted password)
-- **SFTP Files app** — browse remote dirs, open text/hex in Viewer
-- Transfers / processes panes still placeholders
+- Desktop WM, vault, SSH/PTY connect
+- SFTP Files + Viewer
+- **Transfer queue** with upload/download, progress, cancel/retry, local path picker
 
 ## Build
 
@@ -26,10 +24,11 @@ cargo run -p ssh-desk
 | Context | Binding |
 |---------|---------|
 | Launcher | `Enter` connect, `j/k` select, `r` reload vault, `q` quit |
-| Desktop | `Tab` focus, `F2` Files, `F3` Term, `F6` Viewer, `Ctrl+H`/`Ctrl+V` split |
-| Files | `j/k` move, `Enter` open/cd, `Backspace` parent, `r` refresh |
+| Desktop | `Tab` focus, `F2` Files, `F5` Transfers, `F6` Viewer, splits |
+| Files | `Enter` open, `Ctrl+U` upload, `Ctrl+D` download, `r` refresh |
+| Transfers | `j/k` select, `c` cancel, `r` retry, `u`/`d` queue |
+| Path picker | browse or `Tab` edit path, `Enter` confirm, `Esc` cancel |
 | Viewer | `j/k` scroll, `Esc`/`q` close |
-| Global | `Esc` launcher (closes viewer first), `Ctrl+Q` quit |
 
 ## Layout
 

@@ -22,6 +22,7 @@ use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
 
 use crate::files::{resolve_open_path, FilesState, ViewerState};
+use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,9 @@ pub struct App {
     demo_term: String,
     files: FilesState,
     viewer: ViewerState,
+    transfers: TransfersUi,
+    path_prompt: Option<PathPrompt>,
+    pending_files_refresh: bool,
     should_quit: bool,
     connect_in_flight: bool,
 }
@@ -67,12 +71,15 @@ impl App {
                 "┌ ssh-desk terminal ─────────────────────\n\
                  │ Not connected yet.\n\
                  │ From the launcher, pick a host and press Enter.\n\
-                 │ Keys: Tab focus · F2 Files · F3 Term · F6 Viewer\n\
-                 │       Enter opens files · Ctrl+H/V split · q quit\n\
+                 │ Keys: Tab focus · F2 Files · F3 Term · F5 Transfers\n\
+                 │       Ctrl+U upload · Ctrl+D download · q quit\n\
                  └──────────────────────────────────────────\n",
             ),
             files: FilesState::default(),
             viewer: ViewerState::default(),
+            transfers: TransfersUi::default(),
+            path_prompt: None,
+            pending_files_refresh: false,
             should_quit: false,
             connect_in_flight: false,
         }
@@ -229,6 +236,17 @@ impl App {
                         }
                     }
                 }
+                SessionEvent::TransferUpdate(job) => {
+                    let done_upload = job.status == ssh_core::TransferStatus::Done
+                        && job.direction == ssh_core::TransferDirection::Upload;
+                    let name = job.display_name();
+                    let status = job.status;
+                    self.transfers.upsert(job);
+                    self.status = format!("transfer · {} · {}", name, status.label());
+                    if done_upload && self.files.online {
+                        self.pending_files_refresh = true;
+                    }
+                }
                 SessionEvent::Status(msg) => self.status = msg,
                 SessionEvent::Error(msg) => self.status = format!("error: {msg}"),
             }
@@ -236,6 +254,10 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.path_prompt.is_some() {
+            self.handle_path_prompt_key(key).await?;
+            return Ok(());
+        }
         match self.screen {
             Screen::Launcher => self.handle_launcher_key(key).await?,
             Screen::Desktop => self.handle_desktop_key(key).await?,
@@ -376,9 +398,7 @@ impl App {
             }
             AppKind::Files => self.handle_files_key(key).await?,
             AppKind::Viewer => self.handle_viewer_key(key),
-            AppKind::Transfers => {
-                self.status = "transfers · queue empty (Phase 3)".into();
-            }
+            AppKind::Transfers => self.handle_transfers_key(key).await?,
             AppKind::Processes => {
                 self.status = "processes · Phase 4 remote ps view".into();
             }
@@ -391,6 +411,17 @@ impl App {
     }
 
     async fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                self.begin_upload_prompt();
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+                self.begin_download_prompt();
+                return Ok(());
+            }
+            _ => {}
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.files.move_up(),
             KeyCode::Down | KeyCode::Char('j') => self.files.move_down(),
@@ -423,6 +454,210 @@ impl App {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn begin_upload_prompt(&mut self) {
+        if !self.files.online {
+            self.status = "upload needs a live SFTP session".into();
+            return;
+        }
+        self.path_prompt = Some(PathPrompt::upload(self.files.cwd.clone()));
+        self.status = "upload · pick a local file (Enter) or type path".into();
+    }
+
+    fn begin_download_prompt(&mut self) {
+        if !self.files.online {
+            self.status = "download needs a live SFTP session".into();
+            return;
+        }
+        let Some(row) = self.files.selected_row() else {
+            return;
+        };
+        let Some((path, is_dir)) = resolve_open_path(&self.files.cwd, row, &self.files.entries) else {
+            return;
+        };
+        if is_dir {
+            self.status = "select a file to download (dirs later)".into();
+            return;
+        }
+        let size = self
+            .files
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .and_then(|e| e.size);
+        self.path_prompt = Some(PathPrompt::download(path, size));
+        self.status = "download · confirm local path and press Enter".into();
+    }
+
+    async fn handle_path_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.path_prompt.as_mut() else {
+            return Ok(());
+        };
+
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) => {
+                self.path_prompt = None;
+                self.status = "transfer cancelled".into();
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+                prompt.editing = !prompt.editing;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        if prompt.editing {
+            match key.code {
+                KeyCode::Char(c) => prompt.buffer.push(c),
+                KeyCode::Backspace => {
+                    prompt.buffer.pop();
+                }
+                KeyCode::Enter => {
+                    let path = prompt.resolved_path();
+                    let kind = prompt.kind;
+                    let remote = prompt.remote.clone();
+                    let remote_size = prompt.remote_size;
+                    self.path_prompt = None;
+                    self.submit_path_prompt(kind, path, remote, remote_size)
+                        .await?;
+                }
+                KeyCode::Tab => prompt.editing = false,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => prompt.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => prompt.move_down(),
+            KeyCode::Enter => {
+                if let Some(path) = prompt.activate_selected() {
+                    let kind = prompt.kind;
+                    let remote = prompt.remote.clone();
+                    let remote_size = prompt.remote_size;
+                    self.path_prompt = None;
+                    self.submit_path_prompt(kind, path, remote, remote_size)
+                        .await?;
+                }
+            }
+            KeyCode::Char('s') if prompt.kind == PathPromptKind::Download => {
+                let path = prompt.download_into_cwd();
+                let remote = prompt.remote.clone();
+                let remote_size = prompt.remote_size;
+                self.path_prompt = None;
+                self.submit_path_prompt(PathPromptKind::Download, path, remote, remote_size)
+                    .await?;
+            }
+            KeyCode::Char('e') | KeyCode::Tab => prompt.editing = true,
+            KeyCode::Backspace => {
+                if let Some(parent) = prompt.browse_cwd.parent() {
+                    prompt.browse_cwd = parent.to_path_buf();
+                    prompt.refresh_listing();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn submit_path_prompt(
+        &mut self,
+        kind: PathPromptKind,
+        local: PathBuf,
+        remote: PathBuf,
+        remote_size: Option<u64>,
+    ) -> Result<()> {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no active session".into();
+            return Ok(());
+        };
+        match kind {
+            PathPromptKind::Upload => match self.hub.enqueue_upload(&host_id, local, remote).await {
+                Ok(id) => {
+                    self.status = format!("queued upload · {}", id.0);
+                    if let Some(desktop) = self.desktop.as_mut() {
+                        // Focus transfers pane if present
+                        if let Some((tid, _)) = desktop
+                            .tree
+                            .leaves()
+                            .into_iter()
+                            .find(|(_, a)| *a == AppKind::Transfers)
+                        {
+                            desktop.tree.set_focus(tid);
+                        }
+                    }
+                    // Refresh after a short moment is event-driven on Done
+                }
+                Err(e) => self.status = format!("upload failed to queue · {e}"),
+            },
+            PathPromptKind::Download => {
+                let dest = if local.is_dir() {
+                    let name = remote
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download.bin".into());
+                    local.join(name)
+                } else {
+                    local
+                };
+                match self
+                    .hub
+                    .enqueue_download(&host_id, remote, dest, remote_size)
+                    .await
+                {
+                    Ok(id) => {
+                        self.status = format!("queued download · {}", id.0);
+                        if let Some(desktop) = self.desktop.as_mut() {
+                            if let Some((tid, _)) = desktop
+                                .tree
+                                .leaves()
+                                .into_iter()
+                                .find(|(_, a)| *a == AppKind::Transfers)
+                            {
+                                desktop.tree.set_focus(tid);
+                            }
+                        }
+                    }
+                    Err(e) => self.status = format!("download failed to queue · {e}"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_transfers_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.transfers.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => self.transfers.move_down(),
+            KeyCode::Char('c') => {
+                if let Some(id) = self.transfers.selected_id() {
+                    if self.hub.cancel_transfer(id).await {
+                        self.status = "transfer cancel requested".into();
+                    }
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(id) = self.transfers.selected_id() {
+                    match self.hub.retry_transfer(id).await {
+                        Ok(new_id) => self.status = format!("retry queued · {}", new_id.0),
+                        Err(e) => self.status = format!("retry failed · {e}"),
+                    }
+                }
+            }
+            KeyCode::Char('u') => {
+                self.begin_upload_prompt();
+            }
+            KeyCode::Char('d') => {
+                self.begin_download_prompt();
+            }
+            _ => {
+                self.status =
+                    "transfers · j/k select · c cancel · r retry · u upload · d download".into();
+            }
         }
         Ok(())
     }
@@ -466,6 +701,8 @@ impl App {
             clipboard_has_files: self.clipboard.has_files(),
             files: &self.files,
             viewer: &self.viewer,
+            transfers: &self.transfers,
+            path_prompt: self.path_prompt.as_ref(),
         }
     }
 }
@@ -514,6 +751,11 @@ pub async fn run() -> Result<()> {
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         app.drain_events();
+        if app.pending_files_refresh {
+            app.pending_files_refresh = false;
+            let cwd = app.files.cwd.clone();
+            let _ = app.load_dir(cwd).await;
+        }
         terminal.draw(|frame| ui::draw(frame, &app.frame_model()))?;
 
         if app.should_quit {

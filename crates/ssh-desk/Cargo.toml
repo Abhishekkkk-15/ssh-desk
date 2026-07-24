@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 crossterm = { workspace = true }
+dirs = { workspace = true }
 ratatui = { workspace = true }
 ssh-core = { workspace = true }
 ssh-os = { workspace = true }

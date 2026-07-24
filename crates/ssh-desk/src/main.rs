@@ -2,6 +2,7 @@
 
 mod app;
 mod files;
+mod transfers;
 mod ui;
 
 use anyhow::Result;

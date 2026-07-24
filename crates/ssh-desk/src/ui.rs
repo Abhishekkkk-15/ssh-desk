@@ -9,6 +9,7 @@ use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
 use crate::files::{FilesRow, FilesState, ViewerState};
+use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenKind {
@@ -26,6 +27,8 @@ pub struct UiFrame<'a> {
     pub clipboard_has_files: bool,
     pub files: &'a FilesState,
     pub viewer: &'a ViewerState,
+    pub transfers: &'a TransfersUi,
+    pub path_prompt: Option<&'a PathPrompt>,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -51,6 +54,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     draw_dock(frame, chunks[2], model);
     draw_status(frame, chunks[3], model);
+    if let Some(prompt) = model.path_prompt {
+        draw_path_prompt(frame, area, prompt);
+    }
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
@@ -243,19 +249,7 @@ fn draw_app_body(
             ];
             frame.render_widget(Paragraph::new(lines), area);
         }
-        AppKind::Transfers => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    " queue ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from("  (empty)"),
-                Line::from(""),
-                Line::from("Uploads from picker, paste, and DnD"),
-                Line::from("appear here with progress."),
-            ];
-            frame.render_widget(Paragraph::new(lines), area);
-        }
+        AppKind::Transfers => draw_transfers(frame, area, focused, model.transfers),
         AppKind::Viewer => draw_viewer(frame, area, model.viewer),
         AppKind::Editor => {
             frame.render_widget(
@@ -327,12 +321,204 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
 
     if focused {
         lines.push(Line::from(Span::styled(
-            "Enter open · Backspace up · r refresh",
+            "Enter open · Ctrl+U upload · Ctrl+D download · r refresh",
             Style::default().fg(Color::DarkGray),
         )));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &TransfersUi) {
+    let mut lines: Vec<Line> = Vec::new();
+    if transfers.jobs.is_empty() {
+        lines.push(Line::from("queue empty"));
+        lines.push(Line::from(""));
+        lines.push(Line::from("Ctrl+U / u  upload"));
+        lines.push(Line::from("Ctrl+D / d  download"));
+    } else {
+        for (idx, job) in transfers.jobs.iter().enumerate() {
+            let selected = idx == transfers.selected;
+            let pct = job
+                .progress_pct()
+                .map(|p| format!("{p:5.1}%"))
+                .unwrap_or_else(|| "  —  ".into());
+            let bar = progress_bar(job.progress_pct().unwrap_or(0.0), 10);
+            let line = format!(
+                "{} {} {} {} {}",
+                job.direction.arrow(),
+                job.display_name(),
+                bar,
+                pct,
+                job.status.label()
+            );
+            let style = if selected && focused {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                match job.status {
+                    ssh_core::TransferStatus::Failed => Style::default().fg(Color::Red),
+                    ssh_core::TransferStatus::Done => Style::default().fg(Color::Green),
+                    ssh_core::TransferStatus::Running => Style::default().fg(Color::Yellow),
+                    _ => Style::default(),
+                }
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+            if selected {
+                let detail = format!(
+                    "  {} {}  {}",
+                    ssh_core::format_bytes(job.bytes_done),
+                    job.remote_path.display(),
+                    if job.bytes_per_sec > 0.0 {
+                        ssh_core::format_rate(job.bytes_per_sec)
+                    } else {
+                        String::new()
+                    }
+                );
+                lines.push(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(Color::DarkGray),
+                )));
+                if let Some(err) = &job.error {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {err}"),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+        }
+    }
+    if focused {
+        lines.push(Line::from(Span::styled(
+            "c cancel · r retry · u/d queue",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn progress_bar(pct: f64, width: usize) -> String {
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let mut s = String::from("[");
+    for i in 0..width {
+        s.push(if i < filled { '#' } else { '-' });
+    }
+    s.push(']');
+    s
+}
+
+fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
+    let width = area.width.min(72).max(40);
+    let height = area.height.min(18).max(10);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", prompt.title))
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let mode = if prompt.editing {
+        "path edit"
+    } else {
+        "browse"
+    };
+    let kind = match prompt.kind {
+        PathPromptKind::Upload => "upload local file",
+        PathPromptKind::Download => "save download as",
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!("{kind}  [{mode}]")),
+            Line::from(Span::styled(
+                format!("> {}", prompt.buffer),
+                if prompt.editing {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            )),
+        ]),
+        chunks[0],
+    );
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!("local: {}", prompt.browse_cwd.display()),
+        Style::default().fg(Color::Yellow),
+    ))];
+    if let Some(err) = &prompt.error {
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    let visible = chunks[1].height.saturating_sub(1) as usize;
+    let start = prompt
+        .browse_selected
+        .saturating_sub(visible.saturating_sub(1));
+    for (idx, entry) in prompt
+        .browse_entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
+        let label = if entry.is_dir {
+            format!("{}/", entry.name)
+        } else {
+            entry.name.clone()
+        };
+        let selected = idx == prompt.browse_selected && !prompt.editing;
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if entry.is_dir {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("  {label}"), style)));
+    }
+    frame.render_widget(Paragraph::new(lines), chunks[1]);
+
+    frame.render_widget(
+        Paragraph::new(match prompt.kind {
+            PathPromptKind::Upload => {
+                "Enter pick file · Tab/e edit path · Esc cancel".to_string()
+            }
+            PathPromptKind::Download => {
+                "Enter overwrite file · s save here · Tab/e edit · Esc".to_string()
+            }
+        }),
+        chunks[2],
+    );
 }
 
 fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
@@ -405,7 +591,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "Enter connect · q quit",
         ScreenKind::Desktop => {
-            "Tab focus · F2 Files · F6 Viewer · Enter open · Esc · Ctrl+Q quit"
+            "Tab · F2 Files · F5 Transfers · Ctrl+U/D · Esc · Ctrl+Q"
         }
     };
     let line = Line::from(vec![
