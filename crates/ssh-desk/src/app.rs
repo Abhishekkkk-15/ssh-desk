@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -16,7 +16,10 @@ use crossterm::terminal::{
 };
 use ratatui::DefaultTerminal;
 use ssh_core::{join_remote, SessionEvent, SessionHub};
-use ssh_os::{Clipboard, DragPayload, DragSession, DropTarget, FileEntry, FileLocation, FileOp};
+use ssh_os::{
+    classify_paste, existing_files, Clipboard, DragPayload, DragSession, DropTarget, FileEntry,
+    FileLocation, FileOp, OsDropOffer, PasteKind,
+};
 use ssh_vault::{HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
@@ -58,6 +61,7 @@ pub struct App {
     drop_target: Option<DropTarget>,
     pending_drop: Option<PendingDrop>,
     pending_open_parent: bool,
+    os_drop: Option<OsDropOffer>,
     should_quit: bool,
     connect_in_flight: bool,
 }
@@ -102,6 +106,7 @@ impl App {
             drop_target: None,
             pending_drop: None,
             pending_open_parent: false,
+            os_drop: None,
             should_quit: false,
             connect_in_flight: false,
         }
@@ -276,6 +281,10 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.os_drop.is_some() {
+            self.handle_os_drop_key(key).await?;
+            return Ok(());
+        }
         if self.path_prompt.is_some() {
             self.handle_path_prompt_key(key).await?;
             return Ok(());
@@ -283,6 +292,127 @@ impl App {
         match self.screen {
             Screen::Launcher => self.handle_launcher_key(key).await?,
             Screen::Desktop => self.handle_desktop_key(key).await?,
+        }
+        Ok(())
+    }
+
+    async fn handle_paste(&mut self, data: String) -> Result<()> {
+        match classify_paste(&data) {
+            PasteKind::Paths(paths) => {
+                let files = existing_files(&paths);
+                if files.is_empty() {
+                    self.status = format!(
+                        "drop · {} path(s) parsed, none are local files",
+                        paths.len()
+                    );
+                    return Ok(());
+                }
+                self.offer_os_upload(files);
+            }
+            PasteKind::Text(text) => {
+                // Forward plain text to the PTY when the terminal pane is focused.
+                if self.screen == Screen::Desktop {
+                    let focused = self
+                        .desktop
+                        .as_ref()
+                        .map(|d| d.focused_app())
+                        .unwrap_or(AppKind::Terminal);
+                    if focused == AppKind::Terminal {
+                        if let Some(host_id) = &self.active_host_id {
+                            if self.hub.is_connected(host_id).await {
+                                let _ = self.hub.write_pty(host_id, text.as_bytes()).await;
+                                return Ok(());
+                            }
+                        }
+                        self.demo_term.push_str(&text);
+                        return Ok(());
+                    }
+                }
+                self.status = "paste · not a file path list (drop files from OS, or Ctrl+L)".into();
+            }
+        }
+        Ok(())
+    }
+
+    fn offer_os_upload(&mut self, paths: Vec<PathBuf>) {
+        if !self.files.online {
+            self.status = "OS drop · connect a session to upload".into();
+            // Still park paths on the file clipboard for later paste.
+            let entries: Vec<FileEntry> = paths
+                .into_iter()
+                .map(|p| FileEntry::local(p, false))
+                .collect();
+            let n = entries.len();
+            self.clipboard.set_files(entries, FileOp::Copy);
+            self.status =
+                format!("OS drop · {n} file(s) on clipboard · connect then Ctrl+V to upload");
+            return;
+        }
+        let dest = self.files.cwd.clone();
+        let n = paths.len();
+        self.os_drop = Some(OsDropOffer::new(paths, dest));
+        self.status = format!("OS drop · confirm upload of {n} file(s) · Enter/y · Esc");
+    }
+
+    async fn handle_os_drop_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(offer) = self.os_drop.as_mut() else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.os_drop = None;
+                self.status = "OS drop cancelled".into();
+            }
+            KeyCode::Left | KeyCode::Char('h') => offer.selected = 0,
+            KeyCode::Right | KeyCode::Char('l') => offer.selected = 1,
+            KeyCode::Tab => offer.selected = 1 - offer.selected,
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if offer.selected == 1 {
+                    self.os_drop = None;
+                    self.status = "OS drop cancelled".into();
+                } else {
+                    let offer = self.os_drop.take().unwrap();
+                    self.queue_os_uploads(offer.paths, offer.dest).await?;
+                }
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                let offer = self.os_drop.take().unwrap();
+                self.queue_os_uploads(offer.paths, offer.dest).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn queue_os_uploads(&mut self, paths: Vec<PathBuf>, dest: PathBuf) -> Result<()> {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no session".into();
+            return Ok(());
+        };
+        let mut queued = 0usize;
+        for path in paths {
+            match self
+                .hub
+                .enqueue_upload(&host_id, path.clone(), dest.clone())
+                .await
+            {
+                Ok(_) => queued += 1,
+                Err(e) => {
+                    self.status = format!("upload failed · {}: {e}", path.display());
+                }
+            }
+        }
+        self.pending_files_refresh = true;
+        self.status = format!("queued {queued} upload(s) → {}", dest.display());
+        if let Some(desktop) = self.desktop.as_mut() {
+            if let Some((tid, _)) = desktop
+                .tree
+                .leaves()
+                .into_iter()
+                .find(|(_, a)| *a == AppKind::Transfers)
+            {
+                desktop.tree.set_focus(tid);
+            }
         }
         Ok(())
     }
@@ -321,8 +451,13 @@ impl App {
             .map(|d| d.focused_app())
             .unwrap_or(AppKind::Terminal);
 
-        // Esc: cancel drag → clear marks → close viewer → launcher
+        // Esc: cancel OS drop → cancel drag → clear marks → close viewer → launcher
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            if self.os_drop.is_some() {
+                self.os_drop = None;
+                self.status = "OS drop cancelled".into();
+                return Ok(());
+            }
             if self.drag.is_some() {
                 self.drag = None;
                 self.drop_target = None;
@@ -1091,40 +1226,55 @@ impl App {
         let Some(pending) = self.pending_drop.take() else {
             return Ok(());
         };
-        let DragPayload::Files(files) = pending.payload else {
-            self.status = "OS path drops arrive in Phase 6".into();
-            return Ok(());
-        };
-        if files.is_empty() {
-            return Ok(());
-        }
 
-        let dest = match &pending.target {
-            DropTarget::Folder { path, .. } => path.clone(),
-            DropTarget::TransferDock => self.files.cwd.clone(),
-            DropTarget::Ask => {
-                self.status = "drop cancelled · no target".into();
-                return Ok(());
+        match pending.payload {
+            DragPayload::Files(files) => {
+                if files.is_empty() {
+                    return Ok(());
+                }
+                let dest = match &pending.target {
+                    DropTarget::Folder { path, .. } => path.clone(),
+                    DropTarget::TransferDock => self.files.cwd.clone(),
+                    DropTarget::Ask => {
+                        self.status = "drop cancelled · no target".into();
+                        return Ok(());
+                    }
+                };
+                let op = if pending.force_move {
+                    FileOp::Cut
+                } else {
+                    FileOp::Copy
+                };
+                self.clipboard.set_files(files, op);
+                self.paste_clipboard_into(dest, pending.force_move).await?;
+                if matches!(pending.target, DropTarget::TransferDock) {
+                    if let Some(desktop) = self.desktop.as_mut() {
+                        if let Some((tid, _)) = desktop
+                            .tree
+                            .leaves()
+                            .into_iter()
+                            .find(|(_, a)| *a == AppKind::Transfers)
+                        {
+                            desktop.tree.set_focus(tid);
+                        }
+                    }
+                }
             }
-        };
-
-        let op = if pending.force_move {
-            FileOp::Cut
-        } else {
-            FileOp::Copy
-        };
-        self.clipboard.set_files(files, op);
-        self.paste_clipboard_into(dest, pending.force_move).await?;
-
-        if matches!(pending.target, DropTarget::TransferDock) {
-            if let Some(desktop) = self.desktop.as_mut() {
-                if let Some((tid, _)) = desktop
-                    .tree
-                    .leaves()
-                    .into_iter()
-                    .find(|(_, a)| *a == AppKind::Transfers)
-                {
-                    desktop.tree.set_focus(tid);
+            DragPayload::OsPaths(paths) => {
+                let files = existing_files(&paths);
+                if files.is_empty() {
+                    self.status = "OS drop · no local files in payload".into();
+                    return Ok(());
+                }
+                let dest = pending
+                    .target
+                    .remote_dir(&self.files.cwd)
+                    .unwrap_or_else(|| self.files.cwd.clone());
+                if self.files.online {
+                    self.os_drop = Some(OsDropOffer::new(files, dest));
+                    self.status = "OS drop · confirm upload · Enter/y · Esc".into();
+                } else {
+                    self.offer_os_upload(files);
                 }
             }
         }
@@ -1154,6 +1304,7 @@ impl App {
             path_prompt: self.path_prompt.as_ref(),
             drag: self.drag.as_ref(),
             drop_target: self.drop_target.as_ref(),
+            os_drop: self.os_drop.as_ref(),
         }
     }
 }
@@ -1251,6 +1402,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
             match event::read()? {
                 Event::Key(key) => app.handle_key(key).await?,
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
+                Event::Paste(data) => app.handle_paste(data).await?,
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -1262,7 +1414,12 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
 fn setup_terminal() -> Result<DefaultTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let terminal = ratatui::Terminal::new(backend)?;
     Ok(terminal)
@@ -1272,6 +1429,7 @@ fn restore_terminal(terminal: &mut DefaultTerminal) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;

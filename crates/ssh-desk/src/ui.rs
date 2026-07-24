@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
-use ssh_os::{DragPayload, DragSession, DropTarget};
+use ssh_os::{DragPayload, DragSession, DropTarget, OsDropOffer};
 use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
@@ -35,6 +35,7 @@ pub struct UiFrame<'a> {
     pub path_prompt: Option<&'a PathPrompt>,
     pub drag: Option<&'a DragSession>,
     pub drop_target: Option<&'a DropTarget>,
+    pub os_drop: Option<&'a OsDropOffer>,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -62,6 +63,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     draw_status(frame, chunks[3], model);
     if let Some(prompt) = model.path_prompt {
         draw_path_prompt(frame, area, prompt);
+    }
+    if let Some(offer) = model.os_drop {
+        draw_os_drop_confirm(frame, area, offer);
     }
     if let Some(drag) = model.drag {
         draw_drag_ghost(frame, drag, model.drop_target);
@@ -576,6 +580,70 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
         }),
         chunks[2],
     );
+}
+
+fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) {
+    let width = area.width.min(64).max(40);
+    let height = 10u16.min(area.height).max(8);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" OS file drop ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            offer.summary(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (i, path) in offer.paths.iter().take(4).enumerate() {
+        lines.push(Line::from(format!("  {}. {}", i + 1, path.display())));
+    }
+    if offer.paths.len() > 4 {
+        lines.push(Line::from(format!("  … +{} more", offer.paths.len() - 4)));
+    }
+    lines.push(Line::from(""));
+
+    let upload_style = if offer.selected == 0 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let cancel_style = if offer.selected == 1 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Upload ", upload_style),
+        Span::raw("  "),
+        Span::styled(" Cancel ", cancel_style),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "Enter/y confirm · Tab switch · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&DropTarget>) {

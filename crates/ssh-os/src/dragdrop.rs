@@ -58,4 +58,34 @@ impl DropTarget {
             Self::Ask => "drop → choose destination".into(),
         }
     }
+
+    pub fn remote_dir(&self, fallback_cwd: &std::path::PathBuf) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Folder { path, .. } => Some(path.clone()),
+            Self::TransferDock => Some(fallback_cwd.clone()),
+            Self::Ask => None,
+        }
+    }
+}
+
+/// Confirm an OS→TUI path drop before uploading.
+#[derive(Debug, Clone)]
+pub struct OsDropOffer {
+    pub paths: Vec<PathBuf>,
+    pub dest: PathBuf,
+    pub selected: usize, // 0 = upload, 1 = cancel
+}
+
+impl OsDropOffer {
+    pub fn new(paths: Vec<PathBuf>, dest: PathBuf) -> Self {
+        Self {
+            paths,
+            dest,
+            selected: 0,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        crate::ospaste::describe_upload(&self.paths, &self.dest)
+    }
 }

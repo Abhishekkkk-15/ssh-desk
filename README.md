@@ -6,17 +6,23 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **5** complete:
+Phase **6** complete:
 
-- In-TUI drag-and-drop: drag files onto folders / transfers dock
-- Yellow drop highlights + ghost label (Shift+drop = move)
-- File clipboard, transfer queue, SFTP Files + Viewer
+- OS → TUI file drops via bracketed paste (`file://` / path lists)
+- Confirm dialog before upload into the remote Files cwd
+- In-TUI DnD, clipboard, transfer queue, SFTP Files + Viewer
 
-## Drag & drop
+## OS file drop
 
-1. Mouse-down on a file (or marked selection) in Files  
-2. Drag onto a directory row, Files pane, or Transfers/dock  
-3. Release to copy · hold **Shift** to move · **Esc** cancels  
+Most terminals deliver Explorer/Finder drops as bracketed paste.
+
+1. Connect to a host and open the desktop  
+2. Drop files onto the terminal window (or paste a `file://` URI list)  
+3. Confirm **Upload** → files queue into the current remote directory  
+
+Offline: paths land on the file clipboard for later `Ctrl+V`.
+
+Fallbacks: `Ctrl+U` picker · `Ctrl+L` copy-local · in-TUI drag.
 
 ## Build
 
