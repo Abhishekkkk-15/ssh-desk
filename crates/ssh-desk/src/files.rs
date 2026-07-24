@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use ssh_core::{join_remote, remote_path_string, RemoteEntry, RemoteFileContent};
-use ssh_os::{sniff_open_action, OpenAction};
+use ssh_os::{sniff_open_action, HalfblockPreview, OpenAction};
 
 #[derive(Debug, Clone)]
 pub struct FilesState {
@@ -149,6 +149,19 @@ pub enum FilesRow {
     Entry(usize),
 }
 
+#[derive(Debug, Clone)]
+pub enum ViewerKind {
+    Text,
+    Hex,
+    Image(HalfblockPreview),
+}
+
+impl Default for ViewerKind {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ViewerState {
     pub path: Option<PathBuf>,
@@ -157,6 +170,7 @@ pub struct ViewerState {
     pub scroll: u16,
     pub binary: bool,
     pub truncated: bool,
+    pub kind: ViewerKind,
 }
 
 impl ViewerState {
@@ -168,40 +182,69 @@ impl ViewerState {
         self.path.is_some()
     }
 
-    pub fn from_content(content: RemoteFileContent) -> Self {
+    pub fn from_content(content: RemoteFileContent, preview_cols: u16, preview_rows: u16) -> Self {
         let path = content.path.clone();
         let title = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| remote_path_string(&path));
         let truncated = content.truncated;
-        let binary = content.looks_binary()
-            || matches!(
-                sniff_open_action(&path),
-                OpenAction::Hex | OpenAction::PreviewImage
-            );
+        let action = sniff_open_action(&path);
 
-        let mut body = if binary {
-            content.hex_preview(4096)
+        if matches!(action, OpenAction::PreviewImage) {
+            match HalfblockPreview::from_bytes(&content.bytes, preview_cols, preview_rows) {
+                Ok(preview) => {
+                    let meta = preview.meta.clone();
+                    return Self {
+                        path: Some(path),
+                        title,
+                        body: meta,
+                        scroll: 0,
+                        binary: false,
+                        truncated,
+                        kind: ViewerKind::Image(preview),
+                    };
+                }
+                Err(e) => {
+                    return Self {
+                        path: Some(path),
+                        title,
+                        body: format!("image decode failed: {e}\n\n{}", content.hex_preview(2048)),
+                        scroll: 0,
+                        binary: true,
+                        truncated,
+                        kind: ViewerKind::Hex,
+                    };
+                }
+            }
+        }
+
+        let force_hex = content.looks_binary() || matches!(action, OpenAction::Hex);
+        let (mut body, kind, binary) = if force_hex {
+            (content.hex_preview(4096), ViewerKind::Hex, true)
         } else {
-            content
-                .as_text()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| content.hex_preview(4096))
+            (
+                content
+                    .as_text()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| content.hex_preview(4096)),
+                ViewerKind::Text,
+                content.as_text().is_none(),
+            )
         };
 
         if truncated {
             body.push_str("\n\n… truncated at 512 KiB …\n");
         }
 
-        // Demo offline open for known demo files
         Self {
             path: Some(path),
             title,
             body,
             scroll: 0,
-            binary: binary || content.as_text().is_none(),
+            binary,
             truncated,
+            kind,
         }
     }
 
@@ -215,7 +258,10 @@ impl ViewerState {
                 "Demo notes\n\nConnect over SSH to browse and open real remote files via SFTP.\n"
                     .into()
             }
-            "readme.md" => "# ssh-desk\n\nRemote OS shell in the terminal.\n\nOpen files from the Files pane.\n".into(),
+            "readme.md" => {
+                "# ssh-desk\n\nRemote OS shell in the terminal.\n\nOpen files from the Files pane.\n"
+                    .into()
+            }
             _ => format!("(demo) contents of {name}\n"),
         };
         Self {
@@ -225,6 +271,7 @@ impl ViewerState {
             scroll: 0,
             binary: false,
             truncated: false,
+            kind: ViewerKind::Text,
         }
     }
 
@@ -237,7 +284,11 @@ impl ViewerState {
     }
 }
 
-pub fn resolve_open_path(cwd: &Path, row: FilesRow, entries: &[RemoteEntry]) -> Option<(PathBuf, bool)> {
+pub fn resolve_open_path(
+    cwd: &Path,
+    row: FilesRow,
+    entries: &[RemoteEntry],
+) -> Option<(PathBuf, bool)> {
     match row {
         FilesRow::Parent => Some((join_remote(cwd, ".."), true)),
         FilesRow::Entry(i) => entries.get(i).map(|e| (e.path.clone(), e.is_dir)),

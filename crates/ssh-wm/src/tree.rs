@@ -267,23 +267,24 @@ impl PaneTree {
 
     /// Focus an existing Viewer pane, or turn a spare pane into one / split.
     pub fn focus_or_open_viewer(&mut self) {
-        if let Some((id, _)) = self
-            .leaves()
-            .into_iter()
-            .find(|(_, app)| *app == AppKind::Viewer)
-        {
+        self.focus_or_open_app(AppKind::Viewer, AppKind::Processes);
+    }
+
+    /// Focus an existing Editor pane, or convert Viewer / split.
+    pub fn focus_or_open_editor(&mut self) {
+        self.focus_or_open_app(AppKind::Editor, AppKind::Viewer);
+    }
+
+    fn focus_or_open_app(&mut self, want: AppKind, steal: AppKind) {
+        if let Some((id, _)) = self.leaves().into_iter().find(|(_, app)| *app == want) {
             self.focused = id;
             return;
         }
-        if let Some((id, _)) = self
-            .leaves()
-            .into_iter()
-            .find(|(_, app)| *app == AppKind::Processes)
-        {
-            self.set_app(id, AppKind::Viewer);
+        if let Some((id, _)) = self.leaves().into_iter().find(|(_, app)| *app == steal) {
+            self.set_app(id, want);
             self.focused = id;
             return;
         }
-        let _ = self.split_focused(Direction::Vertical, 0.55, AppKind::Viewer);
+        let _ = self.split_focused(Direction::Vertical, 0.55, want);
     }
 }

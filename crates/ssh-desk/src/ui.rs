@@ -11,7 +11,8 @@ use ssh_os::{DragPayload, DragSession, DropTarget, OsDropOffer};
 use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
-use crate::files::{FilesRow, FilesState, ViewerState};
+use crate::apps::{EditorState, ProcessesState};
+use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub struct UiFrame<'a> {
     pub clipboard_label: &'a str,
     pub files: &'a FilesState,
     pub viewer: &'a ViewerState,
+    pub editor: &'a EditorState,
+    pub processes: &'a ProcessesState,
     pub transfers: &'a TransfersUi,
     pub path_prompt: Option<&'a PathPrompt>,
     pub drag: Option<&'a DragSession>,
@@ -149,7 +152,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Line::from("Auth prefers ssh-agent, then private key."),
         Line::from(""),
         Line::from("After connect: tiled desktop with SFTP files."),
-        Line::from("  F2 files · Enter open · F6 viewer"),
+        Line::from("  F2 files · Enter open · e edit · F4 procs · F7 editor"),
         Line::from("Esc returns here from a session."),
     ])
     .block(
@@ -196,6 +199,25 @@ fn draw_pane(
                         format!(" · {}", model.viewer.title)
                     } else {
                         String::new()
+                    },
+                    if focused { " ●" } else { "" }
+                ),
+                AppKind::Editor => format!(
+                    " editor{}{}{} ",
+                    if model.editor.is_open() {
+                        format!(" · {}", model.editor.title)
+                    } else {
+                        String::new()
+                    },
+                    if model.editor.dirty { " *" } else { "" },
+                    if focused { " ●" } else { "" }
+                ),
+                AppKind::Processes => format!(
+                    " processes{}{} ",
+                    if model.processes.online {
+                        format!(" · {}", model.processes.rows.len())
+                    } else {
+                        " · demo".into()
                     },
                     if focused { " ●" } else { "" }
                 ),
@@ -262,25 +284,10 @@ fn draw_app_body(
             );
         }
         AppKind::Files => draw_files(frame, area, focused, model.files, model.drop_target),
-        AppKind::Processes => {
-            let lines = vec![
-                Line::from("PID   CPU  MEM  COMMAND"),
-                Line::from("  1   0.0  0.1  systemd"),
-                Line::from("428   1.2  2.4  nginx"),
-                Line::from("901   0.3  1.1  sshd"),
-                Line::from(""),
-                Line::from("(demo · live remote ps in Phase 4)"),
-            ];
-            frame.render_widget(Paragraph::new(lines), area);
-        }
+        AppKind::Processes => draw_processes(frame, area, focused, model.processes),
         AppKind::Transfers => draw_transfers(frame, area, focused, model.transfers),
         AppKind::Viewer => draw_viewer(frame, area, model.viewer),
-        AppKind::Editor => {
-            frame.render_widget(
-                Paragraph::new("Text editor · save-back over SFTP in Phase 7."),
-                area,
-            );
-        }
+        AppKind::Editor => draw_editor(frame, area, focused, model.editor),
         AppKind::Launcher => {
             frame.render_widget(Clear, area);
         }
@@ -699,15 +706,44 @@ fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&Dr
 fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     if !viewer.is_open() {
         frame.render_widget(
-            Paragraph::new("Open a file from Files (Enter) to view it here.\nEsc closes."),
+            Paragraph::new(
+                "Open a file from Files (Enter).\nImages use half-block preview.\ne open in editor · Esc closes.",
+            ),
             area,
         );
         return;
     }
 
-    let mut header = format!("{}", viewer.title);
-    if viewer.binary {
-        header.push_str("  [hex]");
+    if let ViewerKind::Image(preview) = &viewer.kind {
+        let mut lines = vec![Line::from(Span::styled(
+            format!("{}  {}", viewer.title, preview.meta),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        let max = area.height.saturating_sub(1) as usize;
+        let start = (viewer.scroll as usize).min(preview.rows.len().saturating_sub(1));
+        for row in preview.rows.iter().skip(start).take(max) {
+            let spans: Vec<Span> = row
+                .iter()
+                .map(|cell| {
+                    Span::styled(
+                        "▀",
+                        Style::default().fg(cell.fg).bg(cell.bg),
+                    )
+                })
+                .collect();
+            lines.push(Line::from(spans));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    let mut header = viewer.title.clone();
+    match viewer.kind {
+        ViewerKind::Hex => header.push_str("  [hex]"),
+        ViewerKind::Text => {}
+        ViewerKind::Image(_) => {}
     }
     if viewer.truncated {
         header.push_str("  [truncated]");
@@ -728,6 +764,110 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     ))];
     for line in slice {
         lines.push(Line::from(line.to_string()));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &EditorState) {
+    if !editor.is_open() {
+        frame.render_widget(
+            Paragraph::new(
+                "Open text with Enter (or e) from Files, or press e in Viewer.\nCtrl+S save · Esc close.",
+            ),
+            area,
+        );
+        return;
+    }
+
+    let dirty = if editor.dirty { " *" } else { "" };
+    let mode = if editor.online { "" } else { " [demo]" };
+    let header = format!(
+        "{}{}{}  · Ctrl+S save · Esc",
+        editor.title, dirty, mode
+    );
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    let max = area.height.saturating_sub(1) as usize;
+    let start = editor.scroll as usize;
+    for (i, line) in editor.lines.iter().enumerate().skip(start).take(max) {
+        let row = i;
+        let on_cursor = focused && row == editor.cursor_row;
+        if on_cursor {
+            let chars: Vec<char> = line.chars().collect();
+            let col = editor.cursor_col.min(chars.len());
+            let mut spans = Vec::new();
+            let before: String = chars[..col].iter().collect();
+            if !before.is_empty() {
+                spans.push(Span::raw(before));
+            }
+            let ch = chars.get(col).copied().unwrap_or(' ');
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if col < chars.len() {
+                let after: String = chars[col + 1..].iter().collect();
+                if !after.is_empty() {
+                    spans.push(Span::raw(after));
+                }
+            }
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(line.clone()));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &ProcessesState) {
+    let mut lines = Vec::new();
+    if let Some(err) = &procs.error {
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if procs.loading {
+        lines.push(Line::from("loading…"));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("{:<7} {:<8} {:>5} {:>5}  COMMAND", "PID", "USER", "%CPU", "%MEM"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let visible = area.height.saturating_sub(lines.len() as u16) as usize;
+    let start = procs.selected.saturating_sub(visible.saturating_sub(1));
+    for (idx, row) in procs.rows.iter().enumerate().skip(start).take(visible) {
+        let label = format!(
+            "{:<7} {:<8} {:>5} {:>5}  {}",
+            row.pid, row.user, row.cpu, row.mem, row.command
+        );
+        let style = if idx == procs.selected && focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if idx == procs.selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+    if procs.rows.is_empty() && procs.error.is_none() {
+        lines.push(Line::from("no processes · F4 / r to refresh"));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
@@ -777,7 +917,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "Enter connect · q quit",
         ScreenKind::Desktop => {
-            "Space mark · Ctrl+C/X/V · Ctrl+L local · F2 Files · Esc"
+            "F2 Files · F4 Procs · F7 Edit · Ctrl+S save · Esc"
         }
     };
     let line = Line::from(vec![

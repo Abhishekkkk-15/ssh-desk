@@ -24,10 +24,13 @@ use ssh_vault::{HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
 
+use crate::apps::{EditorState, ProcessesState};
 use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
 use crate::hit::{self, FrameGeo};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
+use ssh_os::OpenAction;
+use ssh_os::sniff_open_action;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -50,6 +53,8 @@ pub struct App {
     demo_term: String,
     files: FilesState,
     viewer: ViewerState,
+    editor: EditorState,
+    processes: ProcessesState,
     transfers: TransfersUi,
     path_prompt: Option<PathPrompt>,
     pending_files_refresh: bool,
@@ -91,12 +96,14 @@ impl App {
                 "┌ ssh-desk terminal ─────────────────────\n\
                  │ Not connected yet.\n\
                  │ From the launcher, pick a host and press Enter.\n\
-                 │ Keys: Tab focus · F2 Files · F3 Term · F5 Transfers\n\
-                 │       Ctrl+U upload · Ctrl+D download · q quit\n\
+                 │ Keys: Tab · F2 Files · F3 Term · F4 Procs · F5 Xfer · F7 Edit\n\
+                 │       Ctrl+U/D transfer · Ctrl+S save · q quit\n\
                  └──────────────────────────────────────────\n",
             ),
             files: FilesState::default(),
             viewer: ViewerState::default(),
+            editor: EditorState::default(),
+            processes: ProcessesState::default(),
             transfers: TransfersUi::default(),
             path_prompt: None,
             pending_files_refresh: false,
@@ -136,11 +143,13 @@ impl App {
                 self.screen = Screen::Desktop;
                 self.demo_term.clear();
                 self.viewer.clear();
+                self.editor.clear();
                 self.status = format!("connected · {}", profile.name);
                 if let Err(e) = self.refresh_files_home().await {
                     self.files = FilesState::demo();
                     self.status = format!("connected · files: {e}");
                 }
+                let _ = self.refresh_processes().await;
             }
             Err(e) => {
                 self.active_host_id = Some(profile.id.clone());
@@ -153,6 +162,8 @@ impl App {
                 );
                 self.files = FilesState::demo();
                 self.viewer.clear();
+                self.editor.clear();
+                self.processes = ProcessesState::demo();
                 self.status = format!("offline desktop · {e}");
             }
         }
@@ -206,20 +217,24 @@ impl App {
                 if let Err(e) = self.load_dir(path).await {
                     self.status = format!("cd failed · {e}");
                 }
+            } else if path.ends_with("Documents") {
+                self.files.cwd = path;
+                self.files.entries = vec![];
+                self.files.selected = 0;
+                self.status = "files · /home/demo/Documents (demo empty)".into();
             } else {
-                // Demo: only allow parent / Documents
-                if path.ends_with("Documents") {
-                    self.files.cwd = path;
-                    self.files.entries = vec![];
-                    self.files.selected = 0;
-                    self.status = "files · /home/demo/Documents (demo empty)".into();
-                } else {
-                    self.files = FilesState::demo();
-                    self.status = "files · demo root".into();
-                }
+                self.files = FilesState::demo();
+                self.status = "files · demo root".into();
             }
             return Ok(());
         }
+
+        self.open_path(path, false).await
+    }
+
+    async fn open_path(&mut self, path: PathBuf, force_editor: bool) -> Result<()> {
+        let action = sniff_open_action(&path);
+        let into_editor = force_editor || matches!(action, OpenAction::EditText);
 
         if self.files.online {
             let Some(host_id) = self.active_host_id.clone() else {
@@ -227,7 +242,23 @@ impl App {
             };
             match self.hub.read_file(&host_id, &path).await {
                 Ok(content) => {
-                    self.viewer = ViewerState::from_content(content);
+                    if into_editor && !content.looks_binary() {
+                        if let Some(text) = content.as_text() {
+                            self.editor = EditorState::from_text(path, text, true);
+                            if let Some(desktop) = self.desktop.as_mut() {
+                                desktop.tree.focus_or_open_editor();
+                            }
+                            self.status = format!("editor · {}", self.editor.title);
+                            return Ok(());
+                        }
+                    }
+                    let (cols, rows) = self
+                        .last_geo
+                        .as_ref()
+                        .and_then(|g| g.files_pane_inner)
+                        .map(|r| (r.width.saturating_sub(2).max(20), r.height.saturating_sub(2).max(8)))
+                        .unwrap_or((60, 20));
+                    self.viewer = ViewerState::from_content(content, cols, rows);
                     if let Some(desktop) = self.desktop.as_mut() {
                         desktop.tree.focus_or_open_viewer();
                     }
@@ -235,12 +266,74 @@ impl App {
                 }
                 Err(e) => self.status = format!("open failed · {e}"),
             }
+        } else if into_editor {
+            self.editor = EditorState::from_text(
+                path.clone(),
+                &ViewerState::demo_file(&path).body,
+                false,
+            );
+            if let Some(desktop) = self.desktop.as_mut() {
+                desktop.tree.focus_or_open_editor();
+            }
+            self.status = format!("editor · {} (demo)", self.editor.title);
         } else {
             self.viewer = ViewerState::demo_file(&path);
             if let Some(desktop) = self.desktop.as_mut() {
                 desktop.tree.focus_or_open_viewer();
             }
             self.status = format!("viewer · {} (demo)", self.viewer.title);
+        }
+        Ok(())
+    }
+
+    async fn refresh_processes(&mut self) -> Result<()> {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.processes = ProcessesState::demo();
+            return Ok(());
+        };
+        if !self.hub.is_connected(&host_id).await {
+            self.processes = ProcessesState::demo();
+            return Ok(());
+        }
+        self.processes.loading = true;
+        // Portable-ish listing; fall back if busybox/ps lacks flags.
+        let cmd = "ps -eo pid,user,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -n 50 || ps aux 2>/dev/null | head -n 50";
+        match self.hub.exec_capture(&host_id, cmd).await {
+            Ok(out) => {
+                self.processes = ProcessesState::from_ps(&out);
+                if self.processes.rows.is_empty() {
+                    self.processes.error = Some("no process rows parsed".into());
+                }
+                self.status = format!("processes · {} rows", self.processes.rows.len());
+            }
+            Err(e) => {
+                self.processes.loading = false;
+                self.processes.error = Some(e.to_string());
+                self.processes.online = false;
+                self.status = format!("processes · {e}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn save_editor(&mut self) -> Result<()> {
+        let Some(path) = self.editor.path.clone() else {
+            return Ok(());
+        };
+        if !self.editor.online {
+            self.status = "editor · offline demo (cannot save)".into();
+            return Ok(());
+        }
+        let Some(host_id) = self.active_host_id.clone() else {
+            return Ok(());
+        };
+        let data = self.editor.contents();
+        match self.hub.write_file(&host_id, &path, data.as_bytes()).await {
+            Ok(()) => {
+                self.editor.dirty = false;
+                self.status = format!("saved · {}", path.display());
+            }
+            Err(e) => self.status = format!("save failed · {e}"),
         }
         Ok(())
     }
@@ -470,6 +563,27 @@ impl App {
                 self.status = "selection cleared".into();
                 return Ok(());
             }
+            if focused == AppKind::Editor && self.editor.is_open() {
+                if self.editor.dirty && !self.editor.discard_armed {
+                    self.editor.discard_armed = true;
+                    self.status =
+                        "unsaved changes · Ctrl+S save · Esc again discards".into();
+                    return Ok(());
+                }
+                self.editor.clear();
+                if let Some(desktop) = self.desktop.as_mut() {
+                    if let Some((id, _)) = desktop
+                        .tree
+                        .leaves()
+                        .into_iter()
+                        .find(|(_, app)| *app == AppKind::Files)
+                    {
+                        desktop.tree.set_focus(id);
+                    }
+                }
+                self.status = "editor closed".into();
+                return Ok(());
+            }
             if focused == AppKind::Viewer && self.viewer.is_open() {
                 self.viewer.clear();
                 if let Some(desktop) = self.desktop.as_mut() {
@@ -520,6 +634,8 @@ impl App {
             }
             (_, KeyCode::F(4)) => {
                 desktop.tree.set_focused_app(AppKind::Processes);
+                drop(desktop);
+                let _ = self.refresh_processes().await;
                 return Ok(());
             }
             (_, KeyCode::F(5)) => {
@@ -528,6 +644,10 @@ impl App {
             }
             (_, KeyCode::F(6)) => {
                 desktop.tree.focus_or_open_viewer();
+                return Ok(());
+            }
+            (_, KeyCode::F(7)) => {
+                desktop.tree.focus_or_open_editor();
                 return Ok(());
             }
             (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
@@ -565,14 +685,10 @@ impl App {
                 }
             }
             AppKind::Files => self.handle_files_key(key).await?,
-            AppKind::Viewer => self.handle_viewer_key(key),
+            AppKind::Viewer => self.handle_viewer_key(key).await?,
             AppKind::Transfers => self.handle_transfers_key(key).await?,
-            AppKind::Processes => {
-                self.status = "processes · Phase 4 remote ps view".into();
-            }
-            AppKind::Editor => {
-                self.status = "editor · save-back in Phase 7".into();
-            }
+            AppKind::Processes => self.handle_processes_key(key).await?,
+            AppKind::Editor => self.handle_editor_key(key).await?,
             AppKind::Launcher => {}
         }
         Ok(())
@@ -643,6 +759,17 @@ impl App {
                     let _ = self.load_dir(cwd).await;
                 } else {
                     self.status = "files · offline demo (connect for SFTP refresh)".into();
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(row) = self.files.selected_row() {
+                    if let Some((path, is_dir)) =
+                        resolve_open_path(&self.files.cwd, row, &self.files.entries)
+                    {
+                        if !is_dir {
+                            self.open_path(path, true).await?;
+                        }
+                    }
                 }
             }
             KeyCode::Home => self.files.selected = 0,
@@ -1084,19 +1211,79 @@ impl App {
         Ok(())
     }
 
-    fn handle_viewer_key(&mut self, key: KeyEvent) {
+    async fn handle_viewer_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.viewer.scroll_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.viewer.scroll_by(1),
             KeyCode::PageUp => self.viewer.scroll_by(-10),
             KeyCode::PageDown => self.viewer.scroll_by(10),
             KeyCode::Home => self.viewer.scroll = 0,
+            KeyCode::Char('e') => {
+                if let Some(path) = self.viewer.path.clone() {
+                    if !self.viewer.binary {
+                        self.open_path(path, true).await?;
+                    } else {
+                        self.status = "cannot edit binary/hex view".into();
+                    }
+                }
+            }
             KeyCode::Char('q') => {
                 self.viewer.clear();
                 self.status = "viewer closed".into();
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn handle_editor_key(&mut self, key: KeyEvent) -> Result<()> {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+                self.save_editor().await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+        match key.code {
+            KeyCode::Left => self.editor.move_left(),
+            KeyCode::Right => self.editor.move_right(),
+            KeyCode::Up => self.editor.move_up(),
+            KeyCode::Down => self.editor.move_down(),
+            KeyCode::Home => self.editor.cursor_col = 0,
+            KeyCode::End => {
+                self.editor.cursor_col = self.editor.lines[self.editor.cursor_row]
+                    .chars()
+                    .count();
+            }
+            KeyCode::Enter => self.editor.insert_newline(),
+            KeyCode::Backspace => self.editor.backspace(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor.insert_char(c);
+            }
+            _ => {}
+        }
+        let height = self
+            .last_geo
+            .as_ref()
+            .and_then(|g| g.files_pane_inner)
+            .map(|r| r.height.saturating_sub(2).max(4))
+            .unwrap_or(20);
+        self.editor.ensure_visible(height);
+        Ok(())
+    }
+
+    async fn handle_processes_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.processes.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => self.processes.move_down(),
+            KeyCode::Char('r') => {
+                self.refresh_processes().await?;
+            }
+            _ => {
+                self.status = "processes · j/k select · r refresh".into();
+            }
+        }
+        Ok(())
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -1300,6 +1487,8 @@ impl App {
             },
             files: &self.files,
             viewer: &self.viewer,
+            editor: &self.editor,
+            processes: &self.processes,
             transfers: &self.transfers,
             path_prompt: self.path_prompt.as_ref(),
             drag: self.drag.as_ref(),

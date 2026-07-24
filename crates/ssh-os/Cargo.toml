@@ -10,3 +10,5 @@ arboard = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+image = { workspace = true }
+ratatui = { workspace = true }

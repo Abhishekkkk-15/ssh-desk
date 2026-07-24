@@ -1,6 +1,7 @@
 //! ssh-desk — remote OS shell in the terminal.
 
 mod app;
+mod apps;
 mod files;
 mod hit;
 mod transfers;

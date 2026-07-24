@@ -6,11 +6,14 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **6** complete:
+Phase **7** complete:
 
-- OS → TUI file drops via bracketed paste (`file://` / path lists)
-- Confirm dialog before upload into the remote Files cwd
-- In-TUI DnD, clipboard, transfer queue, SFTP Files + Viewer
+- Editor with SFTP save-back (`Ctrl+S`; Esc warns if dirty)
+- Image preview in Viewer (half-block `▀` cells)
+- Processes app via remote `ps` (`F4` / `r` refresh)
+- Files: `e` force-open in editor; Viewer: `e` edit text
+
+Phases 0–6: vault, PTY, Files/Viewer, transfers, clipboard, in-TUI DnD, OS drops.
 
 ## OS file drop
 
@@ -35,8 +38,8 @@ cargo run -p ssh-desk
 ```
 crates/
   ssh-desk/   # TUI binary
-  ssh-core/   # SSH session hub (PTY / SFTP later)
+  ssh-core/   # SSH session hub (PTY / SFTP / exec)
   ssh-vault/  # encrypted host store
   ssh-wm/     # pane tree + layouts
-  ssh-os/     # clipboard, DnD, open-with
+  ssh-os/     # clipboard, DnD, open-with, image preview
 ```

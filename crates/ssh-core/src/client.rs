@@ -338,6 +338,70 @@ impl SessionHub {
         })
     }
 
+    /// Write (create/truncate) a remote file over SFTP.
+    pub async fn write_file(
+        &self,
+        host_id: &str,
+        path: &Path,
+        data: &[u8],
+    ) -> Result<(), CoreError> {
+        use russh_sftp::protocol::OpenFlags;
+        use tokio::io::AsyncWriteExt;
+
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+        let sftp = session
+            .sftp
+            .as_ref()
+            .ok_or_else(|| CoreError::Sftp("sftp not available".into()))?;
+        let path_str = remote_path_string(path);
+        let mut file = sftp
+            .open_with_flags(
+                &path_str,
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        file.write_all(data)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        let _ = file.shutdown().await;
+        Ok(())
+    }
+
+    /// Run a remote command and capture stdout/stderr (combined).
+    pub async fn exec_capture(&self, host_id: &str, command: &str) -> Result<String, CoreError> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+
+        let mut channel = session
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| CoreError::Ssh(e.to_string()))?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| CoreError::Ssh(e.to_string()))?;
+
+        let mut out = Vec::new();
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { ref data } => out.extend_from_slice(data),
+                russh::ChannelMsg::ExtendedData { ref data, .. } => out.extend_from_slice(data),
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
     pub async fn transfers_snapshot(&self) -> Vec<TransferJob> {
         self.transfers.lock().await.clone()
     }
