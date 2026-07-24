@@ -6,11 +6,11 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **3** complete:
+Phase **4** complete:
 
-- Desktop WM, vault, SSH/PTY connect
-- SFTP Files + Viewer
-- **Transfer queue** with upload/download, progress, cancel/retry, local path picker
+- Desktop WM, vault, SSH/PTY, SFTP Files + Viewer
+- Transfer queue with upload/download
+- **File clipboard** — multi-select, copy/cut/paste local↔remote
 
 ## Build
 
@@ -23,12 +23,10 @@ cargo run -p ssh-desk
 
 | Context | Binding |
 |---------|---------|
-| Launcher | `Enter` connect, `j/k` select, `r` reload vault, `q` quit |
-| Desktop | `Tab` focus, `F2` Files, `F5` Transfers, `F6` Viewer, splits |
-| Files | `Enter` open, `Ctrl+U` upload, `Ctrl+D` download, `r` refresh |
-| Transfers | `j/k` select, `c` cancel, `r` retry, `u`/`d` queue |
-| Path picker | browse or `Tab` edit path, `Enter` confirm, `Esc` cancel |
-| Viewer | `j/k` scroll, `Esc`/`q` close |
+| Files | `Space` mark, `Ctrl+C` copy, `Ctrl+X` cut, `Ctrl+V` paste into cwd |
+| Files | `Ctrl+L` copy local file onto clipboard, `Ctrl+Shift+V` paste remote→~/Downloads |
+| Files | `Ctrl+U`/`Ctrl+D` upload/download picker |
+| Transfers | `j/k` select, `c` cancel, `r` retry |
 
 ## Layout
 

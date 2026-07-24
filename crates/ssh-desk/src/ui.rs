@@ -25,6 +25,7 @@ pub struct UiFrame<'a> {
     pub status: &'a str,
     pub term_buffer: &'a str,
     pub clipboard_has_files: bool,
+    pub clipboard_label: &'a str,
     pub files: &'a FilesState,
     pub viewer: &'a ViewerState,
     pub transfers: &'a TransfersUi,
@@ -286,13 +287,14 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
                 .entries
                 .get(*i)
                 .map(|e| {
+                    let mark = if files.is_marked(*i) { "* " } else { "  " };
                     let mut name = e.display_name();
                     if let Some(sz) = e.size {
                         if !e.is_dir {
                             name = format!("{name}  ({sz})");
                         }
                     }
-                    name
+                    format!("{mark}{name}")
                 })
                 .unwrap_or_default(),
         };
@@ -321,7 +323,7 @@ fn draw_files(frame: &mut Frame<'_>, area: Rect, focused: bool, files: &FilesSta
 
     if focused {
         lines.push(Line::from(Span::styled(
-            "Enter open · Ctrl+U upload · Ctrl+D download · r refresh",
+            "Space mark · Ctrl+C/X/V clipboard · Ctrl+L local · Ctrl+U/D",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -449,6 +451,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     let kind = match prompt.kind {
         PathPromptKind::Upload => "upload local file",
         PathPromptKind::Download => "save download as",
+        PathPromptKind::CopyLocal => "copy local to clipboard",
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -516,6 +519,9 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
             PathPromptKind::Download => {
                 "Enter overwrite file · s save here · Tab/e edit · Esc".to_string()
             }
+            PathPromptKind::CopyLocal => {
+                "Enter copy file to clipboard · Tab/e edit · Esc".to_string()
+            }
         }),
         chunks[2],
     );
@@ -580,7 +586,7 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     }
     if model.clipboard_has_files {
         spans.push(Span::styled(
-            " [files on clipboard] ",
+            format!(" [clipboard:{}] ", model.clipboard_label),
             Style::default().fg(Color::Magenta),
         ));
     }
@@ -591,7 +597,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "Enter connect · q quit",
         ScreenKind::Desktop => {
-            "Tab · F2 Files · F5 Transfers · Ctrl+U/D · Esc · Ctrl+Q"
+            "Space mark · Ctrl+C/X/V · Ctrl+L local · F2 Files · Esc"
         }
     };
     let line = Line::from(vec![

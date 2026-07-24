@@ -26,6 +26,8 @@ impl Default for TransferId {
 pub enum TransferDirection {
     Upload,
     Download,
+    /// Same-host remote file copy via SFTP read/write.
+    RemoteCopy,
 }
 
 impl TransferDirection {
@@ -33,6 +35,7 @@ impl TransferDirection {
         match self {
             Self::Upload => "↑ upload",
             Self::Download => "↓ download",
+            Self::RemoteCopy => "⇄ copy",
         }
     }
 
@@ -40,6 +43,7 @@ impl TransferDirection {
         match self {
             Self::Upload => "→",
             Self::Download => "←",
+            Self::RemoteCopy => "⇄",
         }
     }
 }
@@ -90,6 +94,10 @@ pub struct TransferJob {
     pub bytes_total: Option<u64>,
     pub error: Option<String>,
     pub bytes_per_sec: f64,
+    /// After a successful upload, delete the local source (cut local→remote).
+    pub delete_local_after: bool,
+    /// After a successful download, delete the remote source (cut remote→local).
+    pub delete_remote_after: bool,
     pub(crate) cancel: Arc<AtomicBool>,
     pub(crate) last_tick: Instant,
     pub(crate) last_bytes: u64,
@@ -114,10 +122,22 @@ impl TransferJob {
             bytes_total,
             error: None,
             bytes_per_sec: 0.0,
+            delete_local_after: false,
+            delete_remote_after: false,
             cancel: Arc::new(AtomicBool::new(false)),
             last_tick: Instant::now(),
             last_bytes: 0,
         }
+    }
+
+    pub fn with_delete_local(mut self) -> Self {
+        self.delete_local_after = true;
+        self
+    }
+
+    pub fn with_delete_remote(mut self) -> Self {
+        self.delete_remote_after = true;
+        self
     }
 
     pub fn request_cancel(&self) {
@@ -134,18 +154,19 @@ impl TransferJob {
     }
 
     pub fn display_name(&self) -> String {
-        match self.direction {
-            TransferDirection::Upload => self
-                .local_path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.local_path.display().to_string()),
-            TransferDirection::Download => self
-                .remote_path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.remote_path.display().to_string()),
-        }
+        let path = match self.direction {
+            TransferDirection::Upload => &self.local_path,
+            TransferDirection::Download | TransferDirection::RemoteCopy => &self.remote_path,
+        };
+        // RemoteCopy: show source→dest basename from remote_path (dest); prefer source name
+        let path = if self.direction == TransferDirection::RemoteCopy {
+            &self.local_path // source remote stored in local_path field
+        } else {
+            path
+        };
+        path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
     }
 
     pub fn summary_line(&self) -> String {

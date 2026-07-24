@@ -365,6 +365,17 @@ impl SessionHub {
         local_path: PathBuf,
         remote_dir: PathBuf,
     ) -> Result<TransferId, CoreError> {
+        self.enqueue_upload_ex(host_id, local_path, remote_dir, false)
+            .await
+    }
+
+    pub async fn enqueue_upload_ex(
+        self: &Arc<Self>,
+        host_id: &str,
+        local_path: PathBuf,
+        remote_dir: PathBuf,
+        cut: bool,
+    ) -> Result<TransferId, CoreError> {
         if !local_path.is_file() {
             return Err(CoreError::Message(format!(
                 "not a local file: {}",
@@ -380,13 +391,16 @@ impl SessionHub {
         let remote_path = remote_dir.join(name);
         let sftp = self.sftp_arc(host_id).await?;
 
-        let job = TransferJob::new(
+        let mut job = TransferJob::new(
             host_id,
             TransferDirection::Upload,
             local_path.clone(),
             remote_path.clone(),
             Some(meta.len()),
         );
+        if cut {
+            job = job.with_delete_local();
+        }
         let id = job.id;
         let cancel = Arc::clone(&job.cancel);
         self.transfers.lock().await.push(job.clone());
@@ -410,6 +424,18 @@ impl SessionHub {
         local_path: PathBuf,
         remote_size: Option<u64>,
     ) -> Result<TransferId, CoreError> {
+        self.enqueue_download_ex(host_id, remote_path, local_path, remote_size, false)
+            .await
+    }
+
+    pub async fn enqueue_download_ex(
+        self: &Arc<Self>,
+        host_id: &str,
+        remote_path: PathBuf,
+        local_path: PathBuf,
+        remote_size: Option<u64>,
+        cut: bool,
+    ) -> Result<TransferId, CoreError> {
         let sftp = self.sftp_arc(host_id).await?;
         let bytes_total = if remote_size.is_some() {
             remote_size
@@ -420,13 +446,16 @@ impl SessionHub {
                 .and_then(|m| m.size)
         };
 
-        let job = TransferJob::new(
+        let mut job = TransferJob::new(
             host_id,
             TransferDirection::Download,
             local_path.clone(),
             remote_path.clone(),
             bytes_total,
         );
+        if cut {
+            job = job.with_delete_remote();
+        }
         let id = job.id;
         let cancel = Arc::clone(&job.cancel);
         self.transfers.lock().await.push(job.clone());
@@ -442,8 +471,64 @@ impl SessionHub {
         Ok(id)
     }
 
+    /// Same-host remote file copy (source in `from`, destination file path in `to`).
+    pub async fn enqueue_remote_copy(
+        self: &Arc<Self>,
+        host_id: &str,
+        from: PathBuf,
+        to: PathBuf,
+    ) -> Result<TransferId, CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        let bytes_total = sftp
+            .metadata(remote_path_string(&from))
+            .await
+            .ok()
+            .and_then(|m| m.size);
+
+        // local_path field stores the remote source for RemoteCopy jobs.
+        let job = TransferJob::new(
+            host_id,
+            TransferDirection::RemoteCopy,
+            from.clone(),
+            to.clone(),
+            bytes_total,
+        );
+        let id = job.id;
+        let cancel = Arc::clone(&job.cancel);
+        self.transfers.lock().await.push(job.clone());
+        let _ = self
+            .events_tx
+            .send(SessionEvent::TransferUpdate(job.clone()));
+
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = run_remote_copy(sftp, from, to, cancel, &hub, id).await;
+            hub.finish_transfer(id, result).await;
+        });
+        Ok(id)
+    }
+
+    pub async fn remote_rename(
+        &self,
+        host_id: &str,
+        from: &Path,
+        to: &Path,
+    ) -> Result<(), CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        sftp.rename(remote_path_string(from), remote_path_string(to))
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))
+    }
+
+    pub async fn remote_remove_file(&self, host_id: &str, path: &Path) -> Result<(), CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        sftp.remove_file(remote_path_string(path))
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))
+    }
+
     pub async fn retry_transfer(self: &Arc<Self>, id: TransferId) -> Result<TransferId, CoreError> {
-        let (direction, host_id, local, remote, size) = {
+        let (direction, host_id, local, remote, size, del_local, del_remote) = {
             let jobs = self.transfers.lock().await;
             let job = jobs
                 .iter()
@@ -458,6 +543,8 @@ impl SessionHub {
                 job.local_path.clone(),
                 job.remote_path.clone(),
                 job.bytes_total,
+                job.delete_local_after,
+                job.delete_remote_after,
             )
         };
         match direction {
@@ -466,10 +553,15 @@ impl SessionHub {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("/"));
-                self.enqueue_upload(&host_id, local, parent).await
+                self.enqueue_upload_ex(&host_id, local, parent, del_local)
+                    .await
             }
             TransferDirection::Download => {
-                self.enqueue_download(&host_id, remote, local, size).await
+                self.enqueue_download_ex(&host_id, remote, local, size, del_remote)
+                    .await
+            }
+            TransferDirection::RemoteCopy => {
+                self.enqueue_remote_copy(&host_id, local, remote).await
             }
         }
     }
@@ -500,31 +592,66 @@ impl SessionHub {
     }
 
     async fn finish_transfer(&self, id: TransferId, result: Result<(), CoreError>) {
-        let mut jobs = self.transfers.lock().await;
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+        let cleanup = {
+            let mut jobs = self.transfers.lock().await;
+            let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+                return;
+            };
             if job.is_cancelled() {
                 job.status = TransferStatus::Cancelled;
                 job.bytes_per_sec = 0.0;
-            } else {
-                match result {
-                    Ok(()) => {
-                        job.status = TransferStatus::Done;
-                        if let Some(total) = job.bytes_total {
-                            job.bytes_done = total;
-                        }
-                        job.bytes_per_sec = 0.0;
-                        job.error = None;
+                let _ = self
+                    .events_tx
+                    .send(SessionEvent::TransferUpdate(job.clone()));
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    job.status = TransferStatus::Done;
+                    if let Some(total) = job.bytes_total {
+                        job.bytes_done = total;
                     }
-                    Err(e) => {
-                        job.status = TransferStatus::Failed;
-                        job.error = Some(e.to_string());
-                        job.bytes_per_sec = 0.0;
-                    }
+                    job.bytes_per_sec = 0.0;
+                    job.error = None;
+                    Some((
+                        job.host_id.clone(),
+                        job.local_path.clone(),
+                        job.remote_path.clone(),
+                        job.delete_local_after,
+                        job.delete_remote_after,
+                        job.clone(),
+                    ))
+                }
+                Err(e) => {
+                    job.status = TransferStatus::Failed;
+                    job.error = Some(e.to_string());
+                    job.bytes_per_sec = 0.0;
+                    let _ = self
+                        .events_tx
+                        .send(SessionEvent::TransferUpdate(job.clone()));
+                    None
                 }
             }
-            let _ = self
-                .events_tx
-                .send(SessionEvent::TransferUpdate(job.clone()));
+        };
+
+        if let Some((host_id, local, remote, del_local, del_remote, snap)) = cleanup {
+            let _ = self.events_tx.send(SessionEvent::TransferUpdate(snap));
+            if del_local {
+                if let Err(e) = tokio::fs::remove_file(&local).await {
+                    let _ = self.events_tx.send(SessionEvent::Status(format!(
+                        "cut: could not remove local {}: {e}",
+                        local.display()
+                    )));
+                }
+            }
+            if del_remote {
+                if let Err(e) = self.remote_remove_file(&host_id, &remote).await {
+                    let _ = self.events_tx.send(SessionEvent::Status(format!(
+                        "cut: could not remove remote {}: {e}",
+                        remote.display()
+                    )));
+                }
+            }
         }
     }
 }
@@ -571,6 +698,53 @@ async fn run_upload(
         hub.bump_progress(id, done).await;
     }
     let _ = remote.shutdown().await;
+    Ok(())
+}
+
+async fn run_remote_copy(
+    sftp: Arc<SftpSession>,
+    from: PathBuf,
+    to: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+) -> Result<(), CoreError> {
+    use std::sync::atomic::Ordering;
+
+    let from_str = remote_path_string(&from);
+    let to_str = remote_path_string(&to);
+    let mut src = sftp
+        .open(&from_str)
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    let mut dst = sftp
+        .open_with_flags(
+            &to_str,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        )
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))?;
+
+    let mut buf = vec![0u8; CHUNK];
+    let mut done = 0u64;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CoreError::Message("cancelled".into()));
+        }
+        let n = src
+            .read(&mut buf)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n])
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        done += n as u64;
+        hub.bump_progress(id, done).await;
+    }
+    let _ = dst.shutdown().await;
     Ok(())
 }
 

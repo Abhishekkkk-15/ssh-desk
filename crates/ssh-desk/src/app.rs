@@ -16,7 +16,7 @@ use crossterm::terminal::{
 };
 use ratatui::DefaultTerminal;
 use ssh_core::{join_remote, SessionEvent, SessionHub};
-use ssh_os::Clipboard;
+use ssh_os::{Clipboard, FileEntry, FileLocation, FileOp};
 use ssh_vault::{HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
@@ -299,8 +299,13 @@ impl App {
             .map(|d| d.focused_app())
             .unwrap_or(AppKind::Terminal);
 
-        // Esc: close viewer first, else back to launcher
+        // Esc: clear file marks → close viewer → launcher
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            if focused == AppKind::Files && !self.files.marked.is_empty() {
+                self.files.clear_marks();
+                self.status = "selection cleared".into();
+                return Ok(());
+            }
             if focused == AppKind::Viewer && self.viewer.is_open() {
                 self.viewer.clear();
                 if let Some(desktop) = self.desktop.as_mut() {
@@ -420,12 +425,43 @@ impl App {
                 self.begin_download_prompt();
                 return Ok(());
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                self.clipboard_copy_remote();
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+                self.clipboard_cut_remote();
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+                self.clipboard_paste_into_remote().await?;
+                return Ok(());
+            }
+            (mods, KeyCode::Char('v'))
+                if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
+            {
+                self.clipboard_paste_to_local().await?;
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                self.path_prompt = Some(PathPrompt::copy_local());
+                self.status = "copy local · pick a file for the clipboard".into();
+                return Ok(());
+            }
             _ => {}
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.files.move_up(),
             KeyCode::Down | KeyCode::Char('j') => self.files.move_down(),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Char(' ') => {
+                self.files.toggle_mark_selected();
+                self.files.move_down();
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                self.open_selected_file().await?;
+            }
+            // Keep `l` for open; local clipboard uses Ctrl+L
+            KeyCode::Char('l') => {
                 self.open_selected_file().await?;
             }
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
@@ -454,6 +490,214 @@ impl App {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn clipboard_copy_remote(&mut self) {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no session".into();
+            return;
+        };
+        let targets = self.files.clipboard_targets();
+        if targets.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let files: Vec<FileEntry> = targets
+            .iter()
+            .map(|e| FileEntry::remote(&host_id, e.path.clone(), e.is_dir))
+            .collect();
+        let n = files.len();
+        self.clipboard.set_files(files, FileOp::Copy);
+        self.status = format!("copied {n} item(s) · Ctrl+V paste here · Ctrl+Shift+V to local");
+    }
+
+    fn clipboard_cut_remote(&mut self) {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no session".into();
+            return;
+        };
+        let targets = self.files.clipboard_targets();
+        if targets.is_empty() {
+            self.status = "nothing to cut".into();
+            return;
+        }
+        let files: Vec<FileEntry> = targets
+            .iter()
+            .map(|e| FileEntry::remote(&host_id, e.path.clone(), e.is_dir))
+            .collect();
+        let n = files.len();
+        self.clipboard.set_files(files, FileOp::Cut);
+        self.status = format!("cut {n} item(s) · navigate and Ctrl+V to move");
+    }
+
+    async fn clipboard_paste_into_remote(&mut self) -> Result<()> {
+        if !self.files.online {
+            self.status = "paste needs a live SFTP session".into();
+            return Ok(());
+        }
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no session".into();
+            return Ok(());
+        };
+        let op = self.clipboard.file_op().unwrap_or(FileOp::Copy);
+        let entries = self.clipboard.files().to_vec();
+        if entries.is_empty() {
+            self.status = "clipboard empty · Ctrl+C / Ctrl+L first".into();
+            return Ok(());
+        }
+
+        let dest_dir = self.files.cwd.clone();
+        let mut queued = 0usize;
+        let mut moved = 0usize;
+        let mut skipped = 0usize;
+
+        for entry in &entries {
+            let name = match &entry.location {
+                FileLocation::Local { path } | FileLocation::Remote { path, .. } => path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into()),
+            };
+            let dest = dest_dir.join(&name);
+
+            match (&entry.location, op, entry.is_dir) {
+                (FileLocation::Remote { host_id: src, path }, FileOp::Cut, _) if src == &host_id => {
+                    if path == &dest {
+                        skipped += 1;
+                        continue;
+                    }
+                    match self.hub.remote_rename(&host_id, path, &dest).await {
+                        Ok(()) => moved += 1,
+                        Err(e) => {
+                            self.status = format!("move failed · {e}");
+                            return Ok(());
+                        }
+                    }
+                }
+                (FileLocation::Remote { host_id: src, path }, FileOp::Copy, false)
+                    if src == &host_id =>
+                {
+                    match self
+                        .hub
+                        .enqueue_remote_copy(&host_id, path.clone(), dest)
+                        .await
+                    {
+                        Ok(_) => queued += 1,
+                        Err(e) => self.status = format!("copy failed · {e}"),
+                    }
+                }
+                (FileLocation::Remote { .. }, FileOp::Copy, true) => {
+                    skipped += 1;
+                    self.status = "directory copy not supported yet (files only)".into();
+                }
+                (FileLocation::Local { path }, FileOp::Copy | FileOp::Cut, false) => {
+                    let cut = op == FileOp::Cut;
+                    match self
+                        .hub
+                        .enqueue_upload_ex(&host_id, path.clone(), dest_dir.clone(), cut)
+                        .await
+                    {
+                        Ok(_) => queued += 1,
+                        Err(e) => self.status = format!("upload failed · {e}"),
+                    }
+                }
+                (FileLocation::Local { .. }, _, true) => {
+                    skipped += 1;
+                    self.status = "directory upload via clipboard not supported yet".into();
+                }
+                (FileLocation::Remote { host_id: src, .. }, _, _) if src != &host_id => {
+                    skipped += 1;
+                    self.status = "cross-host paste not supported yet".into();
+                }
+                _ => skipped += 1,
+            }
+        }
+
+        if op == FileOp::Cut && moved > 0 {
+            self.clipboard.clear_files();
+        }
+        // Cut uploads clear after successful transfer via delete_local_after;
+        // clear clipboard now for cut remotes that were renamed.
+        if op == FileOp::Cut && queued == 0 && moved > 0 {
+            self.clipboard.clear_files();
+        }
+        if op == FileOp::Cut && queued > 0 {
+            // Keep clipboard until transfers finish would be nicer; clear to avoid double paste.
+            self.clipboard.clear_files();
+        }
+
+        self.files.clear_marks();
+        self.pending_files_refresh = true;
+        self.status = format!(
+            "paste · {moved} moved · {queued} queued · {skipped} skipped"
+        );
+        Ok(())
+    }
+
+    async fn clipboard_paste_to_local(&mut self) -> Result<()> {
+        let Some(host_id) = self.active_host_id.clone() else {
+            self.status = "no session".into();
+            return Ok(());
+        };
+        let op = self.clipboard.file_op().unwrap_or(FileOp::Copy);
+        let entries = self.clipboard.files().to_vec();
+        if entries.is_empty() {
+            // Fall back: download current selection via prompt
+            self.begin_download_prompt();
+            return Ok(());
+        }
+
+        let dest_dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let mut queued = 0usize;
+        for entry in entries {
+            match entry.location {
+                FileLocation::Remote {
+                    host_id: src,
+                    path,
+                } if src == host_id && !entry.is_dir => {
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download.bin".into());
+                    let local = dest_dir.join(name);
+                    let cut = op == FileOp::Cut;
+                    match self
+                        .hub
+                        .enqueue_download_ex(&host_id, path, local, None, cut)
+                        .await
+                    {
+                        Ok(_) => queued += 1,
+                        Err(e) => self.status = format!("download failed · {e}"),
+                    }
+                }
+                FileLocation::Local { .. } => {
+                    self.status = "clipboard already local · nothing to paste to disk".into();
+                }
+                _ => {
+                    self.status = "skip dirs / other hosts for paste-to-local".into();
+                }
+            }
+        }
+        if op == FileOp::Cut {
+            self.clipboard.clear_files();
+        }
+        if queued > 0 {
+            self.status = format!("queued {queued} download(s) → {}", dest_dir.display());
+            if let Some(desktop) = self.desktop.as_mut() {
+                if let Some((tid, _)) = desktop
+                    .tree
+                    .leaves()
+                    .into_iter()
+                    .find(|(_, a)| *a == AppKind::Transfers)
+                {
+                    desktop.tree.set_focus(tid);
+                }
+            }
         }
         Ok(())
     }
@@ -571,6 +815,23 @@ impl App {
         remote: PathBuf,
         remote_size: Option<u64>,
     ) -> Result<()> {
+        match kind {
+            PathPromptKind::CopyLocal => {
+                if !local.is_file() {
+                    self.status = format!("not a file: {}", local.display());
+                    return Ok(());
+                }
+                self.clipboard
+                    .set_files(vec![FileEntry::local(local.clone(), false)], FileOp::Copy);
+                self.status = format!(
+                    "copied local {} · Ctrl+V to upload into remote cwd",
+                    local.display()
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let Some(host_id) = self.active_host_id.clone() else {
             self.status = "no active session".into();
             return Ok(());
@@ -580,7 +841,6 @@ impl App {
                 Ok(id) => {
                     self.status = format!("queued upload · {}", id.0);
                     if let Some(desktop) = self.desktop.as_mut() {
-                        // Focus transfers pane if present
                         if let Some((tid, _)) = desktop
                             .tree
                             .leaves()
@@ -590,7 +850,6 @@ impl App {
                             desktop.tree.set_focus(tid);
                         }
                     }
-                    // Refresh after a short moment is event-driven on Done
                 }
                 Err(e) => self.status = format!("upload failed to queue · {e}"),
             },
@@ -625,6 +884,7 @@ impl App {
                     Err(e) => self.status = format!("download failed to queue · {e}"),
                 }
             }
+            PathPromptKind::CopyLocal => unreachable!(),
         }
         Ok(())
     }
@@ -699,6 +959,11 @@ impl App {
             status: &self.status,
             term_buffer: &self.demo_term,
             clipboard_has_files: self.clipboard.has_files(),
+            clipboard_label: match self.clipboard.file_op() {
+                Some(ssh_os::FileOp::Copy) => "copy",
+                Some(ssh_os::FileOp::Cut) => "cut",
+                None => "",
+            },
             files: &self.files,
             viewer: &self.viewer,
             transfers: &self.transfers,

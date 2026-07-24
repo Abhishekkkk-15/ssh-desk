@@ -11,6 +11,8 @@ pub struct FilesState {
     pub entries: Vec<RemoteEntry>,
     /// Index into `rows()` (includes synthetic `..` when not at root).
     pub selected: usize,
+    /// Selected entry indices (into `entries`, not rows).
+    pub marked: Vec<usize>,
     pub loading: bool,
     pub error: Option<String>,
     pub online: bool,
@@ -22,6 +24,7 @@ impl Default for FilesState {
             cwd: PathBuf::from("/"),
             entries: Vec::new(),
             selected: 0,
+            marked: Vec::new(),
             loading: false,
             error: None,
             online: false,
@@ -56,6 +59,7 @@ impl FilesState {
             cwd,
             entries,
             selected: 0,
+            marked: Vec::new(),
             loading: false,
             error: Some("offline · demo listing (connect for live SFTP)".into()),
             online: false,
@@ -66,6 +70,7 @@ impl FilesState {
         self.cwd = cwd;
         self.entries = entries;
         self.selected = 0;
+        self.marked.clear();
         self.loading = false;
         self.error = None;
         self.online = true;
@@ -97,6 +102,40 @@ impl FilesState {
 
     pub fn selected_row(&self) -> Option<FilesRow> {
         self.rows().get(self.selected).copied()
+    }
+
+    pub fn toggle_mark_selected(&mut self) {
+        let Some(FilesRow::Entry(i)) = self.selected_row() else {
+            return;
+        };
+        if let Some(pos) = self.marked.iter().position(|m| *m == i) {
+            self.marked.remove(pos);
+        } else {
+            self.marked.push(i);
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    pub fn is_marked(&self, entry_idx: usize) -> bool {
+        self.marked.contains(&entry_idx)
+    }
+
+    /// Entries for clipboard: marked set, or the single focused entry.
+    pub fn clipboard_targets(&self) -> Vec<&RemoteEntry> {
+        if !self.marked.is_empty() {
+            return self
+                .marked
+                .iter()
+                .filter_map(|i| self.entries.get(*i))
+                .collect();
+        }
+        match self.selected_row() {
+            Some(FilesRow::Entry(i)) => self.entries.get(i).into_iter().collect(),
+            _ => Vec::new(),
+        }
     }
 
     pub fn cwd_display(&self) -> String {

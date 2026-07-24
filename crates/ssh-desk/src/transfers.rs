@@ -46,6 +46,8 @@ pub enum PathPromptKind {
     Upload,
     /// Pick a local destination path for a remote file download.
     Download,
+    /// Pick local file(s) to place on the file clipboard (for paste → upload).
+    CopyLocal,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +110,24 @@ impl PathPrompt {
             browse_entries: Vec::new(),
             browse_selected: 0,
             editing: true,
+            error: None,
+        };
+        prompt.refresh_listing();
+        prompt
+    }
+
+    pub fn copy_local() -> Self {
+        let start = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let mut prompt = Self {
+            kind: PathPromptKind::CopyLocal,
+            title: "Copy local file to clipboard".into(),
+            buffer: String::new(),
+            remote: PathBuf::new(),
+            remote_size: None,
+            browse_cwd: start,
+            browse_entries: Vec::new(),
+            browse_selected: 0,
+            editing: false,
             error: None,
         };
         prompt.refresh_listing();
