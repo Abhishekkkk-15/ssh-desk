@@ -6,14 +6,20 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **7** complete:
+Phase **7** complete, plus interactive host management:
 
-- Editor with SFTP save-back (`Ctrl+S`; Esc warns if dirty)
-- Image preview in Viewer (half-block `▀` cells)
-- Processes app via remote `ps` (`F4` / `r` refresh)
-- Files: `e` force-open in editor; Viewer: `e` edit text
+- Launcher: **`a` / `n`** add host (agent · key · password), **`d`** delete
+- Password hosts prompt for the vault passphrase on connect
+- Editor save-back, image preview, process monitor
 
-Phases 0–6: vault, PTY, Files/Viewer, transfers, clipboard, in-TUI DnD, OS drops.
+## Add a host
+
+1. Run `cargo run -p ssh-desk`
+2. On the launcher press **`a`**
+3. Fill Name / Host / Port / User; Space cycles Auth
+4. **Ctrl+S** (or Enter on the last field) to save
+
+Vault file: `~/.config/ssh-desk/hosts.toml`
 
 ## OS file drop
 

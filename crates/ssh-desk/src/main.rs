@@ -4,6 +4,7 @@ mod app;
 mod apps;
 mod files;
 mod hit;
+mod hostform;
 mod transfers;
 mod ui;
 

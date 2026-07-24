@@ -20,13 +20,14 @@ use ssh_os::{
     classify_paste, existing_files, Clipboard, DragPayload, DragSession, DropTarget, FileEntry,
     FileLocation, FileOp, OsDropOffer, PasteKind,
 };
-use ssh_vault::{HostProfile, Vault};
+use ssh_vault::{AuthMethod, HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
 
 use crate::apps::{EditorState, ProcessesState};
 use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
 use crate::hit::{self, FrameGeo};
+use crate::hostform::{HostForm, VaultUnlockPrompt};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
 use ssh_os::OpenAction;
@@ -57,6 +58,8 @@ pub struct App {
     processes: ProcessesState,
     transfers: TransfersUi,
     path_prompt: Option<PathPrompt>,
+    host_form: Option<HostForm>,
+    vault_unlock: Option<VaultUnlockPrompt>,
     pending_files_refresh: bool,
     /// Last computed layout for mouse hit-testing.
     last_geo: Option<FrameGeo>,
@@ -106,6 +109,8 @@ impl App {
             processes: ProcessesState::default(),
             transfers: TransfersUi::default(),
             path_prompt: None,
+            host_form: None,
+            vault_unlock: None,
             pending_files_refresh: false,
             last_geo: None,
             mouse_press: None,
@@ -125,9 +130,22 @@ impl App {
 
     async fn connect_selected(&mut self) -> Result<()> {
         let Some(profile) = self.selected_profile().cloned() else {
-            self.status = "no hosts in vault — add one under ~/.config/ssh-desk/hosts.toml".into();
+            self.status = "no hosts in vault — press a to add one".into();
             return Ok(());
         };
+        if matches!(profile.auth, AuthMethod::Password { .. }) {
+            self.vault_unlock = Some(VaultUnlockPrompt::new(profile.name.clone()));
+            self.status = format!("unlock vault for {} · Enter", profile.name);
+            return Ok(());
+        }
+        self.connect_profile(profile, None).await
+    }
+
+    async fn connect_profile(
+        &mut self,
+        profile: HostProfile,
+        password_passphrase: Option<&str>,
+    ) -> Result<()> {
         if self.connect_in_flight {
             return Ok(());
         }
@@ -136,7 +154,10 @@ impl App {
 
         let hub = Arc::clone(&self.hub);
         let vault = self.vault.clone();
-        match hub.connect(profile.clone(), &vault, None).await {
+        match hub
+            .connect(profile.clone(), &vault, password_passphrase)
+            .await
+        {
             Ok(_pty_id) => {
                 self.active_host_id = Some(profile.id.clone());
                 self.desktop = Some(Desktop::new(profile.id.clone(), profile.name.clone()));
@@ -378,6 +399,14 @@ impl App {
             self.handle_os_drop_key(key).await?;
             return Ok(());
         }
+        if self.vault_unlock.is_some() {
+            self.handle_vault_unlock_key(key).await?;
+            return Ok(());
+        }
+        if self.host_form.is_some() {
+            self.handle_host_form_key(key)?;
+            return Ok(());
+        }
         if self.path_prompt.is_some() {
             self.handle_path_prompt_key(key).await?;
             return Ok(());
@@ -527,10 +556,159 @@ impl App {
                 }
             }
             KeyCode::Enter => self.connect_selected().await?,
+            KeyCode::Char('a') | KeyCode::Char('n') => {
+                self.host_form = Some(HostForm::new());
+                self.status = "add host · Tab fields · Space cycle auth · Ctrl+S save · Esc".into();
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.delete_selected_host()?;
+            }
             KeyCode::Char('r') => {
                 self.vault = Vault::open_default()?;
                 self.hosts = self.vault.hosts().to_vec();
+                if self.selected_host >= self.hosts.len() && !self.hosts.is_empty() {
+                    self.selected_host = self.hosts.len() - 1;
+                }
                 self.status = "vault reloaded".into();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn delete_selected_host(&mut self) -> Result<()> {
+        let Some(profile) = self.selected_profile().cloned() else {
+            self.status = "no host to delete".into();
+            return Ok(());
+        };
+        match self.vault.remove(&profile.id) {
+            Ok(()) => {
+                self.hosts = self.vault.hosts().to_vec();
+                if self.selected_host >= self.hosts.len() && !self.hosts.is_empty() {
+                    self.selected_host = self.hosts.len() - 1;
+                }
+                self.status = format!("deleted · {}", profile.name);
+            }
+            Err(e) => self.status = format!("delete failed · {e}"),
+        }
+        Ok(())
+    }
+
+    fn handle_host_form_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.host_form.is_none() {
+            return Ok(());
+        }
+
+        if key.code == KeyCode::Esc {
+            self.host_form = None;
+            self.status = "add host cancelled".into();
+            return Ok(());
+        }
+
+        let should_save = matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::CONTROL, KeyCode::Char('s'))
+        ) || {
+            let form = self.host_form.as_ref().unwrap();
+            key.code == KeyCode::Enter
+                && form.active_fields().last().copied() == Some(form.focus)
+        };
+
+        if should_save {
+            return self.submit_host_form();
+        }
+
+        let form = self.host_form.as_mut().unwrap();
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    form.focus_prev();
+                } else {
+                    form.focus_next();
+                }
+            }
+            (KeyModifiers::SHIFT, KeyCode::BackTab) => form.focus_prev(),
+            (_, KeyCode::Backspace) => form.backspace(),
+            (_, KeyCode::Char(' ')) if form.focus == crate::hostform::HostField::Auth => {
+                form.cycle_auth();
+            }
+            (_, KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'))
+                if form.focus == crate::hostform::HostField::Auth =>
+            {
+                form.cycle_auth();
+            }
+            (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                form.insert_char(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn submit_host_form(&mut self) -> Result<()> {
+        let Some(form) = self.host_form.take() else {
+            return Ok(());
+        };
+        match form.save(&mut self.vault) {
+            Ok(profile) => {
+                self.hosts = self.vault.hosts().to_vec();
+                if let Some(idx) = self.hosts.iter().position(|h| h.id == profile.id) {
+                    self.selected_host = idx;
+                }
+                self.status = format!("added · {} ({}@{}:{})", profile.name, profile.user, profile.host, profile.port);
+            }
+            Err(e) => {
+                let mut form = form;
+                form.error = Some(e.clone());
+                self.host_form = Some(form);
+                self.status = format!("add host · {e}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_vault_unlock_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.vault_unlock.is_none() {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.vault_unlock = None;
+                self.status = "connect cancelled".into();
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.vault_unlock.as_mut() {
+                    prompt.buffer.pop();
+                    prompt.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let passphrase = self
+                    .vault_unlock
+                    .as_ref()
+                    .map(|p| p.buffer.clone())
+                    .unwrap_or_default();
+                if passphrase.is_empty() {
+                    if let Some(prompt) = self.vault_unlock.as_mut() {
+                        prompt.error = Some("passphrase required".into());
+                    }
+                    return Ok(());
+                }
+                let profile = match self.selected_profile().cloned() {
+                    Some(p) => p,
+                    None => {
+                        self.vault_unlock = None;
+                        return Ok(());
+                    }
+                };
+                self.vault_unlock = None;
+                self.connect_profile(profile, Some(&passphrase)).await?;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(prompt) = self.vault_unlock.as_mut() {
+                    prompt.buffer.push(c);
+                    prompt.error = None;
+                }
             }
             _ => {}
         }
@@ -611,6 +789,7 @@ impl App {
             return Ok(());
         };
 
+        let mut refresh_procs = false;
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
                 self.should_quit = true;
@@ -634,9 +813,7 @@ impl App {
             }
             (_, KeyCode::F(4)) => {
                 desktop.tree.set_focused_app(AppKind::Processes);
-                drop(desktop);
-                let _ = self.refresh_processes().await;
-                return Ok(());
+                refresh_procs = true;
             }
             (_, KeyCode::F(5)) => {
                 desktop.tree.set_focused_app(AppKind::Transfers);
@@ -661,6 +838,10 @@ impl App {
                 return Ok(());
             }
             _ => {}
+        }
+        if refresh_procs {
+            let _ = self.refresh_processes().await;
+            return Ok(());
         }
 
         let focused = desktop.focused_app();
@@ -1491,6 +1672,8 @@ impl App {
             processes: &self.processes,
             transfers: &self.transfers,
             path_prompt: self.path_prompt.as_ref(),
+            host_form: self.host_form.as_ref(),
+            vault_unlock: self.vault_unlock.as_ref(),
             drag: self.drag.as_ref(),
             drop_target: self.drop_target.as_ref(),
             os_drop: self.os_drop.as_ref(),

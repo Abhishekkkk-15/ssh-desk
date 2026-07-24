@@ -13,6 +13,7 @@ use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
 use crate::apps::{EditorState, ProcessesState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
+use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub struct UiFrame<'a> {
     pub processes: &'a ProcessesState,
     pub transfers: &'a TransfersUi,
     pub path_prompt: Option<&'a PathPrompt>,
+    pub host_form: Option<&'a HostForm>,
+    pub vault_unlock: Option<&'a VaultUnlockPrompt>,
     pub drag: Option<&'a DragSession>,
     pub drop_target: Option<&'a DropTarget>,
     pub os_drop: Option<&'a OsDropOffer>,
@@ -66,6 +69,12 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     draw_status(frame, chunks[3], model);
     if let Some(prompt) = model.path_prompt {
         draw_path_prompt(frame, area, prompt);
+    }
+    if let Some(form) = model.host_form {
+        draw_host_form(frame, area, form);
+    }
+    if let Some(unlock) = model.vault_unlock {
+        draw_vault_unlock(frame, area, unlock);
     }
     if let Some(offer) = model.os_drop {
         draw_os_drop_confirm(frame, area, offer);
@@ -144,12 +153,14 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
     let help = Paragraph::new(vec![
         Line::from("Enter   connect / open desktop"),
+        Line::from("a / n   add host"),
+        Line::from("d       delete selected host"),
         Line::from("j/k     move selection"),
         Line::from("r       reload vault"),
         Line::from("q       quit"),
         Line::from(""),
         Line::from("Vault: ~/.config/ssh-desk/hosts.toml"),
-        Line::from("Auth prefers ssh-agent, then private key."),
+        Line::from("Auth: ssh-agent · private key · password"),
         Line::from(""),
         Line::from("After connect: tiled desktop with SFTP files."),
         Line::from("  F2 files · Enter open · e edit · F4 procs · F7 editor"),
@@ -474,6 +485,127 @@ fn progress_bar(pct: f64, width: usize) -> String {
     }
     s.push(']');
     s
+}
+
+fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
+    let width = area.width.min(64).max(44);
+    let height = area.height.min(16).max(12);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Add host ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines = Vec::new();
+    for field in form.active_fields() {
+        let focused = *field == form.focus;
+        let value = match field {
+            HostField::Name => form.name.as_str(),
+            HostField::Host => form.host.as_str(),
+            HostField::Port => form.port.as_str(),
+            HostField::User => form.user.as_str(),
+            HostField::Auth => form.auth.label(),
+            HostField::KeyPath => form.key_path.as_str(),
+            HostField::Password => {
+                if form.password.is_empty() {
+                    ""
+                } else {
+                    "••••••••"
+                }
+            }
+            HostField::VaultPass => {
+                if form.vault_pass.is_empty() {
+                    ""
+                } else {
+                    "••••••••"
+                }
+            }
+        };
+        let hint = if *field == HostField::Auth {
+            "  (Space cycle)"
+        } else {
+            ""
+        };
+        let label = format!("{:<10} {}", format!("{}:", field.label()), value);
+        let style = if focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{label}{hint}"), style)));
+    }
+    if let Some(err) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tab next · Ctrl+S save · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockPrompt) {
+    let width = area.width.min(52).max(36);
+    let height = 7u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Unlock vault · {} ", prompt.host_name))
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let masked: String = std::iter::repeat_n('•', prompt.buffer.chars().count()).collect();
+    let mut lines = vec![
+        Line::from("Enter the vault passphrase used when saving this host."),
+        Line::from(Span::styled(
+            format!("> {masked}"),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if let Some(err) = &prompt.error {
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "Enter connect · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
@@ -915,7 +1047,7 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
-        ScreenKind::Launcher => "Enter connect · q quit",
+        ScreenKind::Launcher => "a add · d delete · Enter connect · q quit",
         ScreenKind::Desktop => {
             "F2 Files · F4 Procs · F7 Edit · Ctrl+S save · Esc"
         }
