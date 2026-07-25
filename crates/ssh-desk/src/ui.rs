@@ -15,6 +15,7 @@ use crate::apps::{EditorState, ProcessesState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
+use crate::app::OverwritePrompt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenKind {
@@ -48,6 +49,7 @@ pub struct UiFrame<'a> {
     pub drag: Option<&'a DragSession>,
     pub drop_target: Option<&'a DropTarget>,
     pub os_drop: Option<&'a OsDropOffer>,
+    pub overwrite_prompt: Option<&'a OverwritePrompt>,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -72,6 +74,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         }
         if let Some(offer) = model.os_drop {
             draw_os_drop_confirm(frame, area, offer);
+        }
+        if let Some(oprompt) = model.overwrite_prompt {
+            draw_overwrite_confirm(frame, area, oprompt);
         }
         if let Some(drag) = model.drag {
             draw_drag_ghost(frame, drag, model.drop_target);
@@ -114,6 +119,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     if let Some(offer) = model.os_drop {
         draw_os_drop_confirm(frame, area, offer);
+    }
+    if let Some(oprompt) = model.overwrite_prompt {
+        draw_overwrite_confirm(frame, area, oprompt);
     }
     if let Some(drag) = model.drag {
         draw_drag_ghost(frame, drag, model.drop_target);
@@ -921,6 +929,71 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwritePrompt) {
+    let width = area.width.min(64).max(40);
+    let height = 10u16.min(area.height).max(8);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", prompt.title))
+        .border_style(Style::default().fg(Color::Red));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "The following file(s) already exist on the target folder. Overwrite?",
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (i, name) in prompt.files.iter().take(4).enumerate() {
+        lines.push(Line::from(format!("  {}. {}", i + 1, name)));
+    }
+    if prompt.files.len() > 4 {
+        lines.push(Line::from(format!("  … +{} more", prompt.files.len() - 4)));
+    }
+    lines.push(Line::from(""));
+
+    let yes_style = if prompt.selected == 0 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let no_style = if prompt.selected == 1 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Yes, Overwrite ", yes_style),
+        Span::raw("  "),
+        Span::styled(" No, Cancel ", no_style),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "Enter confirm · Tab switch · Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 
 fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&DropTarget>) {
     let label = match &drag.payload {

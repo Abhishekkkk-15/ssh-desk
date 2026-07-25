@@ -119,6 +119,18 @@ pub struct App {
     files_search: Option<String>,
     should_quit: bool,
     connect_in_flight: bool,
+    overwrite_prompt: Option<OverwritePrompt>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverwritePrompt {
+    pub title: String,
+    pub files: Vec<String>,
+    pub selected: usize, // 0 = Yes, 1 = No
+    // Action details to run if confirmed:
+    pub dest_dir: PathBuf,
+    pub entries: Vec<FileEntry>,
+    pub op: FileOp,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +169,7 @@ impl App {
             files_search: None,
             should_quit: false,
             connect_in_flight: false,
+            overwrite_prompt: None,
         }
     }
 
@@ -601,6 +614,10 @@ impl App {
             self.handle_host_form_key(key)?;
             return Ok(());
         }
+        if self.overwrite_prompt.is_some() {
+            self.handle_overwrite_prompt_key(key).await?;
+            return Ok(());
+        }
         if self.path_prompt.is_some() {
             self.handle_path_prompt_key(key).await?;
             return Ok(());
@@ -667,6 +684,32 @@ impl App {
         let n = paths.len();
         self.os_drop = Some(OsDropOffer::new(paths, dest));
         self.status = format!("OS drop · confirm upload of {n} file(s) · Enter/y · Esc");
+    }
+
+    async fn handle_overwrite_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.overwrite_prompt.as_mut() else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.overwrite_prompt = None;
+                self.status = "paste cancelled".into();
+            }
+            KeyCode::Left | KeyCode::Char('h') => prompt.selected = 0,
+            KeyCode::Right | KeyCode::Char('l') => prompt.selected = 1,
+            KeyCode::Tab => prompt.selected = 1 - prompt.selected,
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if prompt.selected == 1 {
+                    self.overwrite_prompt = None;
+                    self.status = "paste cancelled".into();
+                } else {
+                    let prompt = self.overwrite_prompt.take().unwrap();
+                    self.execute_paste_clipboard_into(prompt.dest_dir, prompt.entries, prompt.op).await?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     async fn handle_os_drop_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1300,7 +1343,7 @@ impl App {
             self.status = "paste needs a live SFTP session".into();
             return Ok(());
         }
-        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
+        let Some(_host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return Ok(());
         };
@@ -1314,6 +1357,42 @@ impl App {
             return Ok(());
         }
 
+        // Check if any matching file exists in target remote directory listing
+        let mut existing_clashes = Vec::new();
+        if let Some(s) = self.slot() {
+            for entry in &entries {
+                let name = match &entry.location {
+                    FileLocation::Local { path } | FileLocation::Remote { path, .. } => path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".into()),
+                };
+                if s.files.entries.iter().any(|e| e.name == name && !e.is_dir) {
+                    existing_clashes.push(name);
+                }
+            }
+        }
+
+        if !existing_clashes.is_empty() {
+            self.overwrite_prompt = Some(OverwritePrompt {
+                title: "Confirm Overwrite".into(),
+                files: existing_clashes,
+                selected: 1, // default to 'No' for safety
+                dest_dir,
+                entries,
+                op,
+            });
+            self.status = "warning: matching files exist, confirm overwrite".into();
+            return Ok(());
+        }
+
+        self.execute_paste_clipboard_into(dest_dir, entries, op).await
+    }
+
+    async fn execute_paste_clipboard_into(&mut self, dest_dir: PathBuf, entries: Vec<FileEntry>, op: FileOp) -> Result<()> {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
+            return Ok(());
+        };
         let mut queued = 0usize;
         let mut moved = 0usize;
         let mut skipped = 0usize;
@@ -1978,6 +2057,7 @@ impl App {
             drag: self.drag.as_ref(),
             drop_target: self.drop_target.as_ref(),
             os_drop: self.os_drop.as_ref(),
+            overwrite_prompt: self.overwrite_prompt.as_ref(),
         }
     }
 }
