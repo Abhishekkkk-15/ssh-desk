@@ -25,6 +25,7 @@ use ssh_wm::{AppKind, Desktop, Direction};
 use tokio::sync::mpsc;
 
 use crate::apps::{EditorState, ProcessesState};
+use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
 use crate::hit::{self, FrameGeo};
 use crate::hostform::{HostForm, VaultUnlockPrompt};
@@ -122,6 +123,7 @@ pub struct App {
     should_quit: bool,
     connect_in_flight: bool,
     overwrite_prompt: Option<OverwritePrompt>,
+    diagnostics: DiagnosticsState,
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +174,24 @@ impl App {
             should_quit: false,
             connect_in_flight: false,
             overwrite_prompt: None,
+            diagnostics: DiagnosticsState::default(),
         }
+    }
+
+    fn note(&mut self, level: DiagLevel, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.diagnostics.push(level, msg.clone());
+        match level {
+            DiagLevel::Error => self.status = format!("error: {msg} · F9 log"),
+            DiagLevel::Warn => self.status = format!("{msg} · F9 log"),
+            DiagLevel::Info => self.status = msg,
+        }
+    }
+
+    fn note_status(&mut self, level: DiagLevel, status: impl Into<String>, log: impl Into<String>) {
+        let status = status.into();
+        self.diagnostics.push(level, log.into());
+        self.status = status;
     }
 
     // ── per-session accessors ──────────────────────────────────────────────────
@@ -238,7 +257,11 @@ impl App {
             Err(e) => {
                 self.connect_in_flight = false;
                 self.vault_unlock = None;
-                self.status = format!("connection failed · {e}");
+                self.note_status(
+                    DiagLevel::Error,
+                    format!("connection failed · {e}"),
+                    format!("connection failed · {e}"),
+                );
                 return Ok(());
             }
         }
@@ -364,7 +387,11 @@ impl App {
                     s.files.loading = false;
                     s.files.error = Some(e.to_string());
                 }
-                self.status = format!("files error · {e}");
+                self.note_status(
+                    DiagLevel::Error,
+                    format!("files error · {e}"),
+                    format!("files list · {e}"),
+                );
                 Err(e)
             }
         }
@@ -383,7 +410,11 @@ impl App {
         if is_dir {
             if online {
                 if let Err(e) = self.load_dir(path).await {
-                    self.status = format!("cd failed · {e}");
+                    self.note_status(
+                        DiagLevel::Error,
+                        format!("cd failed · {e}"),
+                        format!("cd failed · {e}"),
+                    );
                 }
             } else if path.ends_with("Documents") {
                 if let Some(s) = self.slot_mut() {
@@ -438,7 +469,11 @@ impl App {
                     } else { String::new() };
                     self.status = format!("viewer · {}", title);
                 }
-                Err(e) => self.status = format!("open failed · {e}"),
+                Err(e) => self.note_status(
+                    DiagLevel::Error,
+                    format!("open failed · {e}"),
+                    format!("open failed · {e}"),
+                ),
             }
         } else if into_editor {
             let title = if let Some(s) = self.slot_mut() {
@@ -493,7 +528,11 @@ impl App {
                     s.processes.error = Some(e.to_string());
                     s.processes.online = false;
                 }
-                self.status = format!("processes · {e}");
+                self.note_status(
+                    DiagLevel::Error,
+                    format!("processes · {e}"),
+                    format!("processes · {e}"),
+                );
             }
         }
         Ok(())
@@ -519,7 +558,11 @@ impl App {
                 if let Some(s) = self.slot_mut() { s.editor.dirty = false; }
                 self.status = format!("saved · {}", path.display());
             }
-            Err(e) => self.status = format!("save failed · {e}"),
+            Err(e) => self.note_status(
+                DiagLevel::Error,
+                format!("save failed · {e}"),
+                format!("save failed · {} · {e}", path.display()),
+            ),
         }
         Ok(())
     }
@@ -531,7 +574,11 @@ impl App {
                     self.status = format!("connected · {host_id}");
                 }
                 SessionEvent::Disconnected { host_id, reason } => {
-                    self.status = format!("disconnected · {host_id}: {reason} · attempting auto-reconnect...");
+                    self.note_status(
+                        DiagLevel::Warn,
+                        format!("disconnected · {host_id}: {reason} · attempting auto-reconnect..."),
+                        format!("disconnected · {host_id}: {reason}"),
+                    );
                     // Trigger silent auto-reconnect attempt
                     if let Some(pos) = self.sessions.iter().position(|s| s.host_id == host_id) {
                         let slot = &self.sessions[pos];
@@ -597,13 +644,52 @@ impl App {
                     }
                     self.status = format!("transfer · {} · {}", name, status.label());
                 }
-                SessionEvent::Status(msg) => self.status = msg,
-                SessionEvent::Error(msg) => self.status = format!("error: {msg}"),
+                SessionEvent::Status(msg) => {
+                    self.diagnostics.push(DiagLevel::Info, format!("status · {msg}"));
+                    self.status = msg;
+                }
+                SessionEvent::Error(msg) => {
+                    self.note(DiagLevel::Error, msg);
+                }
             }
         }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.code == KeyCode::F(9) {
+            self.diagnostics.toggle();
+            self.status = if self.diagnostics.open {
+                "diagnostics · j/k scroll · c clear · Esc/F9 close".into()
+            } else {
+                "diagnostics closed".into()
+            };
+            return Ok(());
+        }
+        if self.diagnostics.open {
+            match key.code {
+                KeyCode::Esc => {
+                    self.diagnostics.close();
+                    self.status = "diagnostics closed".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.diagnostics.scroll_up(),
+                KeyCode::Down | KeyCode::Char('j') => self.diagnostics.scroll_down(),
+                KeyCode::PageUp => {
+                    for _ in 0..10 {
+                        self.diagnostics.scroll_up();
+                    }
+                }
+                KeyCode::PageDown => {
+                    for _ in 0..10 {
+                        self.diagnostics.scroll_down();
+                    }
+                }
+                KeyCode::Home => self.diagnostics.scroll_home(),
+                KeyCode::End => self.diagnostics.scroll_end(),
+                KeyCode::Char('c') => self.diagnostics.clear(),
+                _ => {}
+            }
+            return Ok(());
+        }
         if self.os_drop.is_some() {
             self.handle_os_drop_key(key).await?;
             return Ok(());
@@ -1481,8 +1567,11 @@ impl App {
                 dest_dir.display()
             );
         } else {
+            for e in &errors {
+                self.diagnostics.push(DiagLevel::Error, format!("paste · {e}"));
+            }
             self.status = format!(
-                "paste incomplete · {} errors, {} done, {} queued, {} skipped",
+                "paste incomplete · {} errors, {} done, {} queued, {} skipped · F9 log",
                 errors.len(), moved, queued, skipped
             );
         }
@@ -2076,6 +2165,7 @@ impl App {
             drop_target: self.drop_target.as_ref(),
             os_drop: self.os_drop.as_ref(),
             overwrite_prompt: self.overwrite_prompt.as_ref(),
+            diagnostics: &self.diagnostics,
         }
     }
 }

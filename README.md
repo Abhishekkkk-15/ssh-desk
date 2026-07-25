@@ -6,11 +6,13 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **7** complete, plus interactive host management:
+Phase **7** complete, plus interactive host management and diagnostics:
 
 - Launcher: **`a` / `n`** add host (agent · key · password), **`d`** delete
 - Password hosts prompt for the vault passphrase on connect
 - Editor save-back, image preview, process monitor
+- **`F9`** diagnostics log (status bar stays one-line; full history in the overlay)
+- File log: `ssh-desk.log` (developer tracing)
 
 ## Add a host
 

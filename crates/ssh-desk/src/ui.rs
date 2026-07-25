@@ -12,6 +12,7 @@ use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
 use crate::apps::{EditorState, ProcessesState};
+use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
@@ -50,6 +51,7 @@ pub struct UiFrame<'a> {
     pub drop_target: Option<&'a DropTarget>,
     pub os_drop: Option<&'a OsDropOffer>,
     pub overwrite_prompt: Option<&'a OverwritePrompt>,
+    pub diagnostics: &'a DiagnosticsState,
 }
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
@@ -77,6 +79,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         }
         if let Some(oprompt) = model.overwrite_prompt {
             draw_overwrite_confirm(frame, area, oprompt);
+        }
+        if model.diagnostics.open {
+            draw_diagnostics(frame, area, model.diagnostics);
         }
         if let Some(drag) = model.drag {
             draw_drag_ghost(frame, drag, model.drop_target);
@@ -122,6 +127,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     if let Some(oprompt) = model.overwrite_prompt {
         draw_overwrite_confirm(frame, area, oprompt);
+    }
+    if model.diagnostics.open {
+        draw_diagnostics(frame, area, model.diagnostics);
     }
     if let Some(drag) = model.drag {
         draw_drag_ghost(frame, drag, model.drop_target);
@@ -930,6 +938,74 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) {
+    let width = area.width.min(90).max(48);
+    let height = area.height.min(22).max(10);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " Diagnostics · {} entries · F9/Esc close ",
+            diag.entries.len()
+        ))
+        .border_style(Style::default().fg(Color::Red));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let visible = chunks[0].height as usize;
+    let total = diag.entries.len();
+    let end = total.saturating_sub(diag.scroll_from_bottom as usize);
+    let start = end.saturating_sub(visible);
+    let slice = diag.entries.get(start..end).unwrap_or(&[]);
+
+    let mut lines = Vec::new();
+    if slice.is_empty() {
+        lines.push(Line::from("(no entries)"));
+    }
+    for entry in slice {
+        let color = match entry.level {
+            DiagLevel::Info => Color::Gray,
+            DiagLevel::Warn => Color::Yellow,
+            DiagLevel::Error => Color::Red,
+        };
+        // Compact clock: last 5 digits of epoch seconds is enough as relative marker.
+        let clock = entry.ts_secs % 100_000;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{clock:05} ",),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("[{}] ", entry.level.tag()),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(entry.message.clone(), Style::default().fg(color)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "j/k scroll · PgUp/PgDn · Home/End · c clear",
+            Style::default().fg(Color::DarkGray),
+        )),
+        chunks[1],
+    );
+}
+
 fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwritePrompt) {
     let width = area.width.min(64).max(40);
     let height = 10u16.min(area.height).max(8);
@@ -1257,10 +1333,8 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
-        ScreenKind::Launcher => "a add · d delete · Enter connect · q quit",
-        ScreenKind::Desktop => {
-            "F2 Files · F4 Procs · F7 Edit · Ctrl+S save · Esc"
-        }
+        ScreenKind::Launcher => "a add · F9 log · Enter connect · q quit",
+        ScreenKind::Desktop => "F2 Files · F4 Procs · F9 log · Esc",
     };
     let line = Line::from(vec![
         Span::styled(

@@ -2,6 +2,7 @@
 
 mod app;
 mod apps;
+mod diagnostics;
 mod files;
 mod hit;
 mod hostform;

@@ -18,3 +18,8 @@ cursor_advanced_ssh_tui_design.md
 *.pem
 *.key
 !crates/**/testdata/**
+
+# Runtime logs
+ssh-desk.log
+*.log
+
