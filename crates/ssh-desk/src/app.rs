@@ -55,6 +55,8 @@ struct SessionSlot {
     desktop: Desktop,
     files: FilesState,
     viewer: ViewerState,
+    /// Terminal graphics protocol state for sharp image previews (Sixel/Kitty/…).
+    viewer_image: Option<ratatui_image::protocol::StatefulProtocol>,
     editor: EditorState,
     processes: ProcessesState,
     transfers: TransfersUi,
@@ -83,6 +85,7 @@ impl SessionSlot {
                 FilesState::demo()
             },
             viewer: ViewerState::default(),
+            viewer_image: None,
             editor: EditorState::default(),
             processes: if online {
                 ProcessesState::default()
@@ -145,6 +148,8 @@ pub struct App {
     pending_cross_host_uploads: VecDeque<CrossHostUpload>,
     /// Remote sources to delete after a successful cross-host cut upload.
     pending_cross_host_cuts: VecDeque<(String, PathBuf)>,
+    /// Detected terminal image protocol (Sixel/Kitty/iTerm2/halfblocks).
+    image_picker: Option<ratatui_image::picker::Picker>,
 }
 
 /// Follow-up work for a cross-host clipboard paste (relay via local temp).
@@ -251,7 +256,16 @@ impl App {
             pending_cross_host: HashMap::new(),
             pending_cross_host_uploads: VecDeque::new(),
             pending_cross_host_cuts: VecDeque::new(),
+            image_picker: None,
         }
+    }
+
+    fn with_image_picker(mut self, picker: Option<ratatui_image::picker::Picker>) -> Self {
+        if let Some(ref p) = picker {
+            tracing::info!(protocol = ?p.protocol_type(), "terminal image protocol ready");
+        }
+        self.image_picker = picker;
+        self
     }
 
     fn persist_ui_prefs(&self) {
@@ -268,9 +282,11 @@ impl App {
         let next = theme::current_theme().toggle();
         theme::set_theme(next);
         self.persist_ui_prefs();
-        // Recomposite transparent pixels onto the new background.
+        // Recomposite unicode half-block previews onto the new background.
         if let Some(s) = self.slot_mut() {
-            if s.viewer.image_bytes.is_some() {
+            if matches!(s.viewer.kind, crate::files::ViewerKind::Image(_))
+                && s.viewer.image_bytes.is_some()
+            {
                 let (cols, rows) = match &s.viewer.kind {
                     crate::files::ViewerKind::Image(p) => (p.width.max(16), p.height.max(6)),
                     _ => (60, 20),
@@ -281,6 +297,26 @@ impl App {
             }
         }
         self.status = format!("theme · {} · Ctrl+T to toggle", next.as_str());
+    }
+
+    fn clear_viewer(&mut self) {
+        if let Some(s) = self.slot_mut() {
+            s.viewer.clear();
+            s.viewer_image = None;
+        }
+    }
+
+    fn take_viewer_image(&mut self) -> Option<ratatui_image::protocol::StatefulProtocol> {
+        self.slot_mut().and_then(|s| s.viewer_image.take())
+    }
+
+    fn restore_viewer_image(
+        &mut self,
+        protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    ) {
+        if let Some(s) = self.slot_mut() {
+            s.viewer_image = protocol;
+        }
     }
 
     fn toggle_compact_dock(&mut self) {
@@ -508,6 +544,7 @@ impl App {
             slot.cached_passphrase = password_passphrase;
             slot.files = FilesState::default();
             slot.viewer.clear();
+            slot.viewer_image = None;
             slot.editor.clear();
             slot.processes = ProcessesState::default();
             slot.term = TermEmulator::new(24, 80);
@@ -781,6 +818,14 @@ impl App {
 
     /// Re-rasterize image preview when the Viewer pane size changes.
     fn refit_image_preview_if_needed(&mut self) {
+        // Graphics-protocol images resize themselves inside StatefulImage.
+        if self
+            .slot()
+            .map(|s| matches!(s.viewer.kind, crate::files::ViewerKind::ImageProto { .. }))
+            .unwrap_or(false)
+        {
+            return;
+        }
         let (cols, rows) = self.viewer_preview_budget();
         let bg = crate::theme::Theme::bg_rgb();
         if let Some(s) = self.slot_mut() {
@@ -788,6 +833,104 @@ impl App {
                 let _ = s.viewer.refit_image(cols, rows, bg);
             }
         }
+    }
+
+    fn install_viewer_image(
+        &mut self,
+        content: ssh_core::RemoteFileContent,
+        cols: u16,
+        rows: u16,
+    ) -> String {
+        let path = content.path.clone();
+        let title = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let truncated = content.truncated;
+        let bg = crate::theme::Theme::bg_rgb();
+
+        // Prefer real terminal graphics (Sixel/Kitty/iTerm2) when the picker found them.
+        if let Some(picker) = self.image_picker.clone() {
+            if let Ok(dyn_img) = image::load_from_memory(&content.bytes) {
+                let (ow, oh) = image::GenericImageView::dimensions(&dyn_img);
+                let proto_label = format!("{:?}", picker.protocol_type());
+                let protocol = picker.new_resize_protocol(dyn_img);
+                let meta = format!("{ow}×{oh} · {proto_label}");
+                if let Some(s) = self.slot_mut() {
+                    s.viewer_image = Some(protocol);
+                    s.viewer = ViewerState {
+                        path: Some(path),
+                        title: title.clone(),
+                        body: meta.clone(),
+                        scroll: 0,
+                        binary: false,
+                        truncated,
+                        kind: crate::files::ViewerKind::ImageProto {
+                            meta: meta.clone(),
+                        },
+                        image_bytes: Some(content.bytes),
+                    };
+                    s.desktop.tree.focus_or_open_viewer();
+                }
+                return format!(
+                    "viewer · {title} · {meta} · o opens OS viewer"
+                );
+            }
+        }
+
+        // Unicode half-block fallback.
+        if let Some(s) = self.slot_mut() {
+            s.viewer_image = None;
+            s.viewer = ViewerState::from_content_on(content, cols, rows, bg);
+            s.desktop.tree.focus_or_open_viewer();
+            format!(
+                "viewer · {} · {} · o opens OS viewer",
+                s.viewer.title, s.viewer.body
+            )
+        } else {
+            "viewer".into()
+        }
+    }
+
+    /// Write current viewer image bytes to a temp file and open with the OS.
+    fn open_viewer_in_os(&mut self) -> Result<()> {
+        let (bytes, name) = match self.slot() {
+            Some(s) if s.viewer.image_bytes.is_some() => (
+                s.viewer.image_bytes.clone().unwrap(),
+                s.viewer.title.clone(),
+            ),
+            _ => {
+                self.status = "no image in viewer · open a PNG/JPEG first".into();
+                return Ok(());
+            }
+        };
+        let safe = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let path = std::env::temp_dir().join(format!("ssh-desk-{safe}"));
+        std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path.display().to_string()])
+                .spawn()
+                .context("start OS image viewer")?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(&path)
+                .spawn()
+                .context("open OS image viewer")?;
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(&path)
+                .spawn()
+                .context("xdg-open OS image viewer")?;
+        }
+        self.status = format!("opened in OS viewer · {}", path.display());
+        Ok(())
     }
 
     /// Build layout geometry for the current frame (matches `ui::draw`).
@@ -990,8 +1133,11 @@ impl App {
                         }
                     }
                     let (cols, rows) = self.viewer_preview_budget();
-                    let bg = crate::theme::Theme::bg_rgb();
-                    let status = if let Some(s) = self.slot_mut() {
+                    let status = if is_image {
+                        self.install_viewer_image(content, cols, rows)
+                    } else if let Some(s) = self.slot_mut() {
+                        s.viewer_image = None;
+                        let bg = crate::theme::Theme::bg_rgb();
                         s.viewer = ViewerState::from_content_on(content, cols, rows, bg);
                         s.desktop.tree.focus_or_open_viewer();
                         format!("viewer · {} · {}", s.viewer.title, s.viewer.body)
@@ -2083,8 +2229,8 @@ impl App {
             if focused == AppKind::Viewer
                 && self.slot().map(|s| s.viewer.is_open()).unwrap_or(false)
             {
+                self.clear_viewer();
                 if let Some(s) = self.slot_mut() {
-                    s.viewer.clear();
                     if let Some((id, _)) = s
                         .desktop
                         .tree
@@ -3139,10 +3285,11 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('o') => {
+                self.open_viewer_in_os()?;
+            }
             KeyCode::Char('q') => {
-                if let Some(s) = self.slot_mut() {
-                    s.viewer.clear();
-                }
+                self.clear_viewer();
                 self.status = "viewer closed".into();
             }
             _ => {}
@@ -3581,13 +3728,83 @@ pub async fn run() -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
     let hub = SessionHub::new(tx);
 
-    let mut app = App::new(vault, hub, rx);
+    let mut terminal = setup_terminal()?;
+    // Query AFTER alternate screen — but NEVER on Git Bash / mintty / native Windows:
+    // `Picker::from_query_stdio` spawns a stdin reader; on timeout that thread keeps
+    // draining keyboard input forever and the UI looks frozen.
+    let picker = init_image_picker();
+    let mut app = App::new(vault, hub, rx).with_image_picker(picker);
     app.try_restore_session();
 
-    let mut terminal = setup_terminal()?;
     let result = event_loop(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn init_image_picker() -> Option<ratatui_image::picker::Picker> {
+    if !image_protocol_query_allowed() {
+        tracing::info!(
+            "skipping terminal image protocol query · halfblocks (set SSH_DESK_IMAGE_QUERY=1 to force)"
+        );
+        return Some(ratatui_image::picker::Picker::from_fontsize((10, 20)));
+    }
+    match ratatui_image::picker::Picker::from_query_stdio() {
+        Ok(p) => {
+            tracing::info!(protocol = ?p.protocol_type(), "terminal image protocol detected");
+            Some(p)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "image protocol query failed · halfblocks fallback");
+            Some(ratatui_image::picker::Picker::from_fontsize((10, 20)))
+        }
+    }
+}
+
+/// `Picker::from_query_stdio` races stdin: on timeout its worker keeps reading forever and
+/// the UI stops receiving keys. That hits Git Bash → WSL especially (mintty PTY, Linux
+/// binary, no `TERM_PROGRAM=mintty` inside the distro). Only query on known-good hosts
+/// or when the user explicitly opts in.
+fn image_protocol_query_allowed() -> bool {
+    match std::env::var("SSH_DESK_IMAGE_QUERY").ok().as_deref() {
+        Some("0") | Some("false") | Some("no") => return false,
+        Some(_) => return true, // any other value = force on
+        None => {}
+    }
+    if std::env::var_os("SSH_DESK_NO_IMAGE_QUERY").is_some() {
+        return false;
+    }
+    // Native Windows / MSYS / mintty: never.
+    if cfg!(windows) || std::env::var_os("MSYSTEM").is_some() {
+        return false;
+    }
+    if matches!(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        Some("mintty")
+    ) {
+        return false;
+    }
+
+    // Allowlist only — WSL under Git Bash has none of these and must skip.
+    if std::env::var_os("WT_SESSION").is_some() {
+        return true; // Windows Terminal
+    }
+    if std::env::var_os("KITTY_WINDOW_ID").is_some() {
+        return true;
+    }
+    if std::env::var_os("WEZTERM_EXECUTABLE").is_some() {
+        return true;
+    }
+    matches!(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        Some(
+            "WezTerm"
+                | "iTerm.app"
+                | "ghostty"
+                | "vscode" // Cursor / VS Code integrated terminal
+                | "WarpTerminal"
+                | "Alacritty"
+        )
+    )
 }
 
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
@@ -3659,7 +3876,11 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
             }
         }
 
-        terminal.draw(|frame| ui::draw(frame, &app.frame_model()))?;
+        let mut viewer_image = app.take_viewer_image();
+        terminal.draw(|frame| {
+            ui::draw(frame, &app.frame_model(), viewer_image.as_mut());
+        })?;
+        app.restore_viewer_image(viewer_image);
 
         if app.should_quit {
             break;

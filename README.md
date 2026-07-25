@@ -62,11 +62,11 @@ Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP 
 - Browse, mark multi-select, search (`/`)
 - Columns: mode, size, mtime, name (symlinks as `name@`)
 - **mkdir** (`a`/`n`), **rename** (`R`), **delete** with confirm (`d`/`Delete`) — recursive delete for directories
-- Open files in Viewer; `e` opens Editor
+- Open files in Viewer; `e` opens Editor; `o` opens images in the OS viewer
 - Upload / download prompts; recursive directory transfers supported in the transfer engine
 
 ### Viewer & Editor
-- Viewer: text, hex preview for binary, **braille** image preview (high-density Unicode)
+- Viewer: text, hex preview for binary, **Sixel/Kitty/iTerm2** in known-good terminals (Windows Terminal, Kitty, WezTerm, iTerm, Cursor/VS Code, …); Unicode ▀ half-blocks otherwise. Press **`o`** for the OS image viewer. Force protocol probe with `SSH_DESK_IMAGE_QUERY=1` (can freeze Git Bash → WSL).
 - Editor: edit remote text, **Ctrl+S** save-back over SFTP; dirty Esc confirm
 
 ### Transfers
@@ -332,6 +332,7 @@ Overwrite existing targets: confirm dialog (Yes / No).
 |-----|--------|
 | `j` `k` / `PgUp` `PgDn` / `Home` | Scroll |
 | `e` | Open in editor |
+| `o` | Open image in OS viewer |
 | `q` / `Esc` | Close view |
 
 ### Editor

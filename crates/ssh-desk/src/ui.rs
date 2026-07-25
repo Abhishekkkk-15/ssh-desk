@@ -20,6 +20,8 @@ use crate::files_prompt::FilesPrompt;
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::term::TermEmulator;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenKind {
@@ -65,13 +67,17 @@ pub struct UiFrame<'a> {
     pub diagnostics: &'a DiagnosticsState,
 }
 
-pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
+pub fn draw(
+    frame: &mut Frame<'_>,
+    model: &UiFrame<'_>,
+    mut viewer_image: Option<&mut StatefulProtocol>,
+) {
     let area = frame.area();
     // Soft slate canvas (avoid pure pitch-black).
     frame.render_widget(Block::default().style(Style::default().bg(Th::bg())), area);
     if model.screen == ScreenKind::Desktop && model.full_screen {
         if let Some(desktop) = model.desktop {
-            draw_desktop(frame, area, desktop, model);
+            draw_desktop(frame, area, desktop, model, &mut viewer_image);
         }
         if model.show_session_switcher {
             draw_session_switcher(frame, model);
@@ -120,7 +126,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         ScreenKind::Launcher => draw_launcher(frame, chunks[1], model),
         ScreenKind::Desktop => {
             if let Some(desktop) = model.desktop {
-                draw_desktop(frame, chunks[1], desktop, model);
+                draw_desktop(frame, chunks[1], desktop, model, &mut viewer_image);
             }
         }
     }
@@ -378,11 +384,17 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     frame.render_widget(help, chunks[1]);
 }
 
-fn draw_desktop(frame: &mut Frame<'_>, area: Rect, desktop: &Desktop, model: &UiFrame<'_>) {
+fn draw_desktop(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    desktop: &Desktop,
+    model: &UiFrame<'_>,
+    viewer_image: &mut Option<&mut StatefulProtocol>,
+) {
     if let Some(app) = model.fullscreen_app {
-        draw_pane_leaf(frame, area, app, true, false, model);
+        draw_pane_leaf(frame, area, app, true, false, model, viewer_image);
     } else {
-        draw_pane(frame, area, desktop.tree.root_node(), desktop, model);
+        draw_pane(frame, area, desktop.tree.root_node(), desktop, model, viewer_image);
     }
 }
 
@@ -392,12 +404,13 @@ fn draw_pane(
     node: &PaneNode,
     desktop: &Desktop,
     model: &UiFrame<'_>,
+    viewer_image: &mut Option<&mut StatefulProtocol>,
 ) {
     match node {
         PaneNode::Leaf { id, app } => {
             let focused = *id == desktop.tree.focused();
             let drop_hot = pane_is_drop_hot(*app, model.drop_target);
-            draw_pane_leaf(frame, area, *app, focused, drop_hot, model);
+            draw_pane_leaf(frame, area, *app, focused, drop_hot, model, viewer_image);
         }
         PaneNode::Split(split) => {
             let (constraint_a, constraint_b) = ratio_constraints(split.ratio);
@@ -409,8 +422,8 @@ fn draw_pane(
                 .direction(dir)
                 .constraints([constraint_a, constraint_b])
                 .split(area);
-            draw_pane(frame, chunks[0], &split.first, desktop, model);
-            draw_pane(frame, chunks[1], &split.second, desktop, model);
+            draw_pane(frame, chunks[0], &split.first, desktop, model, viewer_image);
+            draw_pane(frame, chunks[1], &split.second, desktop, model, viewer_image);
         }
     }
 }
@@ -422,6 +435,7 @@ fn draw_pane_leaf(
     focused: bool,
     drop_hot: bool,
     model: &UiFrame<'_>,
+    viewer_image: &mut Option<&mut StatefulProtocol>,
 ) {
     let border = if drop_hot {
         Style::default().fg(Th::warn()).add_modifier(Modifier::BOLD)
@@ -451,7 +465,7 @@ fn draw_pane_leaf(
 
     draw_pane_header(frame, chunks[0], app, focused, drop_hot, model);
     if chunks[1].height > 0 {
-        draw_app_body(frame, chunks[1], app, focused, model);
+        draw_app_body(frame, chunks[1], app, focused, model, viewer_image);
     }
 }
 
@@ -542,6 +556,7 @@ fn draw_app_body(
     app: AppKind,
     focused: bool,
     model: &UiFrame<'_>,
+    viewer_image: &mut Option<&mut StatefulProtocol>,
 ) {
     frame.render_widget(Clear, area); // Wipe pane canvas to prevent layout overlap/residual text leaks
     match app {
@@ -552,7 +567,7 @@ fn draw_app_body(
         AppKind::Files => draw_files(frame, area, focused, model.files, model.drop_target),
         AppKind::Processes => draw_processes(frame, area, focused, model.processes),
         AppKind::Transfers => draw_transfers(frame, area, focused, model.transfers),
-        AppKind::Viewer => draw_viewer(frame, area, model.viewer),
+        AppKind::Viewer => draw_viewer(frame, area, model.viewer, viewer_image.take()),
         AppKind::Editor => draw_editor(frame, area, focused, model.editor),
         AppKind::Launcher => {}
     }
@@ -1420,14 +1435,42 @@ fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&Dr
     );
 }
 
-fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
+fn draw_viewer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    viewer: &ViewerState,
+    image: Option<&mut StatefulProtocol>,
+) {
     if !viewer.is_open() {
         frame.render_widget(
             Paragraph::new(
-                "Open a file from Files (Enter).\nImages use braille preview (sharp Unicode art).\ne open in editor · Esc closes.",
+                "Open a file from Files (Enter).\nImages use Sixel/Kitty when the terminal supports it (else ▀ half-blocks).\no opens the OS image viewer · e editor · Esc closes.",
             ),
             area,
         );
+        return;
+    }
+
+    if let ViewerKind::ImageProto { meta } = &viewer.kind {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{meta} · o opens OS viewer"),
+                Style::default().fg(Th::info()),
+            )),
+            chunks[0],
+        );
+        if let Some(state) = image {
+            frame.render_stateful_widget(StatefulImage::default(), chunks[1], state);
+        } else {
+            frame.render_widget(
+                Paragraph::new("image protocol state missing · press o for OS viewer"),
+                chunks[1],
+            );
+        }
         return;
     }
 
@@ -1480,7 +1523,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     match viewer.kind {
         ViewerKind::Hex => header.push_str("  [hex]"),
         ViewerKind::Text => {}
-        ViewerKind::Image(_) => {}
+        ViewerKind::Image(_) | ViewerKind::ImageProto { .. } => {}
     }
     if viewer.truncated {
         header.push_str("  [truncated]");

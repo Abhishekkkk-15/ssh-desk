@@ -172,7 +172,10 @@ pub enum FilesRow {
 pub enum ViewerKind {
     Text,
     Hex,
+    /// Unicode ▀ fallback preview.
     Image(HalfblockPreview),
+    /// Terminal graphics protocol (Sixel/Kitty/iTerm2/halfblocks via ratatui-image).
+    ImageProto { meta: String },
 }
 
 impl Default for ViewerKind {
