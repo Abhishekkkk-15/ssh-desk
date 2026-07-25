@@ -33,6 +33,8 @@ pub struct UiFrame<'a> {
     pub selected_host: usize,
     /// Names of all open sessions, for the tab bar.
     pub sessions: Vec<&'a str>,
+    /// Host profile ids that currently have an open session.
+    pub open_host_ids: Vec<&'a str>,
     pub active_session_idx: usize,
     pub show_session_switcher: bool,
     pub full_screen: bool,
@@ -304,17 +306,21 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             } else {
                 "○"
             };
+            let open = model.open_host_ids.iter().any(|id| *id == h.id.as_str());
             let jump = h
                 .jump_via
                 .as_deref()
                 .map(|j| format!(" via:{j}"))
                 .unwrap_or_default();
+            let open_tag = if open { "  [open]" } else { "" };
             let line = format!(
-                " {marker} {}  {}@{}:{}{}",
-                h.name, h.user, h.host, h.port, jump
+                " {marker} {}  {}@{}:{}{}{}",
+                h.name, h.user, h.host, h.port, jump, open_tag
             );
             let style = if i == model.selected_host {
                 Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD)
+            } else if open {
+                Style::default().fg(Th::INFO)
             } else {
                 Style::default()
             };
@@ -322,36 +328,49 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         })
         .collect();
 
+    let host_title = if model.sessions.is_empty() {
+        " Hosts ".to_string()
+    } else {
+        format!(" Hosts  ({} open · Esc back) ", model.sessions.len())
+    };
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Hosts ")
+            .title(host_title)
             .border_style(Style::default().fg(Th::FG_DIM)),
     );
     frame.render_widget(list, chunks[0]);
 
-    let help = Paragraph::new(vec![
-        Line::from("Enter   connect / open desktop"),
+    let mut help_lines = vec![
+        Line::from("Enter   connect (or switch if already open)"),
         Line::from("a / n   add host"),
         Line::from("d       delete selected host"),
         Line::from("j/k     move selection"),
         Line::from("r       reload vault"),
         Line::from("q       quit"),
+    ];
+    if !model.sessions.is_empty() {
+        help_lines.push(Line::from("Esc     back to open desktop"));
+    }
+    help_lines.extend([
         Line::from(""),
         Line::from("Vault: ~/.config/ssh-desk/hosts.toml"),
         Line::from("Auth: ssh-agent · private key · password"),
         Line::from(""),
+        Line::from("Multi-session: Ctrl+N from desktop → pick another host."),
+        Line::from("  Then Ctrl+Tab / F8 to switch sessions."),
         Line::from("After connect: tiled desktop with SFTP files."),
         Line::from("  Ctrl+Space next pane · Tab completes in shell"),
-        Line::from("  F2–F7 open/focus · Ctrl+W close pane · Esc session"),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Welcome ")
-            .border_style(Style::default().fg(Th::FG_DIM)),
-    )
-    .wrap(Wrap { trim: false });
+        Line::from("  F2–F7 open/focus · Ctrl+W close pane · Esc close session"),
+    ]);
+    let help = Paragraph::new(help_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Welcome ")
+                .border_style(Style::default().fg(Th::FG_DIM)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(help, chunks[1]);
 }
 
@@ -1607,8 +1626,13 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
+        ScreenKind::Launcher if !model.sessions.is_empty() => {
+            "Enter connect · Esc desktop · F9 log · Ctrl+Q quit"
+        }
         ScreenKind::Launcher => "a add · F9 log · Enter connect · Ctrl+Q quit",
-        ScreenKind::Desktop => "Ctrl+Space pane · F2–F7 open · Ctrl+W close · Ctrl+Q quit",
+        ScreenKind::Desktop => {
+            "Ctrl+N hosts · Ctrl+Tab session · F8 picker · Ctrl+Q quit"
+        }
     };
     let line = Line::from(vec![
         Span::styled(format!(" {} ", model.status), Style::default().fg(Th::FG)),

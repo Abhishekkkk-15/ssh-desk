@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -260,6 +260,22 @@ impl App {
             self.status = "no hosts in vault — press a to add one".into();
             return Ok(());
         };
+        // Already connected → switch to that tab instead of reconnecting.
+        if let Some(pos) = self
+            .sessions
+            .iter()
+            .position(|s| s.host_id == profile.id)
+        {
+            self.active_idx = pos;
+            self.screen = Screen::Desktop;
+            self.status = format!(
+                "session [{}/{}] · {}",
+                pos + 1,
+                self.sessions.len(),
+                profile.name
+            );
+            return Ok(());
+        }
         if matches!(profile.auth, AuthMethod::Password { .. }) {
             self.vault_unlock = Some(VaultUnlockPrompt::new(profile.name.clone()));
             self.status = format!("unlock vault for {} · Enter", profile.name);
@@ -659,6 +675,36 @@ impl App {
         );
     }
 
+    /// Open the host launcher without disconnecting any sessions.
+    fn open_launcher(&mut self) {
+        self.show_session_switcher = false;
+        self.screen = Screen::Launcher;
+        let n = self.sessions.len();
+        self.status = if n == 0 {
+            "launcher · select a host and press Enter".into()
+        } else {
+            format!(
+                "launcher · {n} session(s) still open · Enter connect · Esc back to desktop"
+            )
+        };
+    }
+
+    /// Return to the active desktop session from the launcher (sessions stay open).
+    fn resume_desktop(&mut self) -> bool {
+        if self.sessions.is_empty() {
+            return false;
+        }
+        self.screen = Screen::Desktop;
+        let name = self.sessions[self.active_idx].host_name.clone();
+        self.status = format!(
+            "session [{}/{}] · {}",
+            self.active_idx + 1,
+            self.sessions.len(),
+            name
+        );
+        true
+    }
+
     /// Disconnect and close the current session tab.
     async fn close_current_session(&mut self) -> Result<()> {
         if self.sessions.is_empty() {
@@ -997,6 +1043,10 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Windows reports Press + Release for every key; ignore non-press to avoid double input.
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         if key.code == KeyCode::F(9) {
             self.diagnostics.toggle();
             self.status = if self.diagnostics.open {
@@ -1438,6 +1488,11 @@ impl App {
                 self.request_quit();
             }
             KeyCode::Char('q') => self.request_quit(),
+            KeyCode::Esc => {
+                if !self.resume_desktop() {
+                    self.status = "no open sessions · pick a host and press Enter".into();
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_host > 0 {
                     self.selected_host -= 1;
@@ -1655,6 +1710,11 @@ impl App {
         }
         if key.code == KeyCode::F(8) {
             self.show_session_switcher = !self.show_session_switcher;
+            return Ok(());
+        }
+        // Hosts launcher without disconnecting (open another session).
+        if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
+            self.open_launcher();
             return Ok(());
         }
         // Quit app (saves open host + deck, or clears if launcher-only).
@@ -3047,6 +3107,7 @@ impl App {
             hosts: &self.hosts,
             selected_host: self.selected_host,
             sessions: self.sessions.iter().map(|s| s.host_name.as_str()).collect(),
+            open_host_ids: self.sessions.iter().map(|s| s.host_id.as_str()).collect(),
             active_session_idx: self.active_idx,
             show_session_switcher: self.show_session_switcher,
             full_screen: self.full_screen,

@@ -44,7 +44,9 @@ Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP 
 - Background **keepalive** and silent reconnect when SSH/SFTP drops
 
 ### Multi-session desktop
-- Multiple hosts open as session tabs
+- Multiple hosts open as session tabs in one process
+- **Ctrl+N** → hosts launcher (sessions stay connected) → **Enter** on another host
+- Switch with **Ctrl+Tab** / **F8**; open hosts marked `[open]` in the launcher
 - Default 4-pane layout: **Shell | Files** over **Processes | Transfers**
 - Open / close / focus panes; restore last layout on quit
 - Pane fullscreen (`F11`) and chrome hide (`Ctrl+F`)
@@ -254,7 +256,8 @@ Overwrite existing targets: confirm dialog (Yes / No).
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Connect selected host |
+| `Enter` | Connect selected host (or switch to it if already open) |
+| `Esc` | Back to desktop when sessions are open |
 | `a` / `n` | Add host |
 | `d` / `Delete` | Delete selected host |
 | `j` `k` / `↑` `↓` | Move selection |
@@ -283,6 +286,7 @@ Overwrite existing targets: confirm dialog (Yes / No).
 
 | Key | Action |
 |-----|--------|
+| `Ctrl+N` | Hosts launcher (keeps open sessions) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous host session |
 | `F8` | Session picker (`j`/`k`, digits `1`–`9`, `Enter`/`Esc`/`F8` close) |
 | `F9` | Diagnostics (`j`/`k`, `PgUp`/`PgDn`, `Home`/`End`, `c` clear, `Esc`/`F9` close) |
@@ -430,14 +434,7 @@ On every push/PR to `main`:
 
 ### Release ([`.github/workflows/release.yml`](.github/workflows/release.yml))
 
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-Builds all platform archives and publishes a GitHub Release. Install scripts pull from that release.
-
-Maintainers can also run the workflow manually (`workflow_dispatch`) with a tag input.
+Manual only (`workflow_dispatch` in the Actions UI). Builds all platform archives from the selected branch/commit and always publishes/updates the **`v0.1.0`** GitHub Release (replacing prior assets). Install scripts pull that release by default (`latest` → `v0.1.0`).
 
 ---
 
