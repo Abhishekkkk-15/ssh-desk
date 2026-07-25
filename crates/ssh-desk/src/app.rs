@@ -1401,11 +1401,23 @@ impl App {
                     self.should_quit = true;
                     return Ok(());
                 }
-                (_, KeyCode::Tab) => {
+                // Pane cycle — always available (including while Shell has focus).
+                (KeyModifiers::CONTROL, KeyCode::Char(' ')) if !shift => {
                     desktop.focus_next();
                     return Ok(());
                 }
-                (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                (mods, KeyCode::Char(' '))
+                    if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
+                {
+                    desktop.focus_prev();
+                    return Ok(());
+                }
+                // Tab cycles panes only outside Shell so bash can use Tab to complete.
+                (_, KeyCode::Tab) if focused != AppKind::Terminal => {
+                    desktop.focus_next();
+                    return Ok(());
+                }
+                (KeyModifiers::SHIFT, KeyCode::BackTab) if focused != AppKind::Terminal => {
                     desktop.focus_prev();
                     return Ok(());
                 }
@@ -2507,6 +2519,7 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => b"\x1b[A".to_vec(),
         KeyCode::Down => b"\x1b[B".to_vec(),

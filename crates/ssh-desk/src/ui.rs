@@ -329,8 +329,8 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Line::from("Auth: ssh-agent · private key · password"),
         Line::from(""),
         Line::from("After connect: tiled desktop with SFTP files."),
-        Line::from("  F2–F7 open/focus pane · Ctrl+W or F10 close pane"),
-        Line::from("  Esc closes session · returns here"),
+        Line::from("  Ctrl+Space next pane · Tab completes in shell"),
+        Line::from("  F2–F7 open/focus · Ctrl+W close pane · Esc session"),
     ])
     .block(
         Block::default()
@@ -1581,7 +1581,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "a add · F9 log · Enter connect · q quit",
         ScreenKind::Desktop => {
-            "F2–F7 open/focus · Ctrl+W / F10 close pane · Esc session"
+            "Ctrl+Space pane · F2–F7 open · Ctrl+W close · Esc session"
         }
     };
     let line = Line::from(vec![
