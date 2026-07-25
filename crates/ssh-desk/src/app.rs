@@ -2019,12 +2019,21 @@ impl App {
                         .split_focused(Direction::Vertical, 0.5, AppKind::Files);
                     (Some("split · files to the right".into()), false)
                 }
-                (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+                // Ctrl+B = shell below (Ctrl+V is clipboard paste when Files is focused).
+                (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
                     let _ =
                         desktop
                             .tree
                             .split_focused(Direction::Horizontal, 0.5, AppKind::Terminal);
                     (Some("split · shell below".into()), false)
+                }
+                // Keep Ctrl+V as split only when Files is not focused so paste can run there.
+                (KeyModifiers::CONTROL, KeyCode::Char('v')) if focused != AppKind::Files => {
+                    let _ =
+                        desktop
+                            .tree
+                            .split_focused(Direction::Horizontal, 0.5, AppKind::Terminal);
+                    (Some("split · shell below · tip: Ctrl+B".into()), false)
                 }
                 _ => (None, false),
             }

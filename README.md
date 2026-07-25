@@ -208,7 +208,7 @@ Default after connect:
 | Open or focus app | `F2` Files · `F3` Shell · `F4` Processes · `F5` Transfers · `F6` Viewer · `F7` Editor |
 | Close focused pane | `Ctrl+W` or `F10` (cannot close the last pane) |
 | Split Files to the right | `Ctrl+H` |
-| Split Shell below | `Ctrl+V` *(layout chord; see Files paste note)* |
+| Split Shell below | `Ctrl+B` |
 | Fullscreen focused pane | `F11` |
 | Hide / show title+dock chrome | `Ctrl+F` |
 
@@ -238,7 +238,7 @@ Closed apps appear dimmed as `[FILES]` on the dock; open ones without brackets; 
 |-------|--------|
 | `Ctrl+C` | Copy marked/focused remote entries |
 | `Ctrl+X` | Cut marked/focused remote entries |
-| `Ctrl+V` | Paste into remote cwd *(may be taken by layout split when pressed as bare Ctrl+V at desktop level — use from Files focus after layout keys; prefer dock Transfers or re-paste)* |
+| `Ctrl+V` | Paste into remote cwd (Files focused) |
 | `Ctrl+Shift+V` | Paste clipboard files to a local path |
 | `Ctrl+L` | Pick a local path onto the clipboard |
 
@@ -456,7 +456,6 @@ Manual only (`workflow_dispatch` in the Actions UI). Builds all platform archive
 - **Windows ARM64** — no prebuilt asset yet (use WSL or source build).
 - **Jump hosts** — supported in core/vault fields; not fully exposed in the add-host form.
 - **Theme** — fixed Tokyo Night–inspired palette (not configurable yet).
-- **Ctrl+V** is also used for “split Shell below” at the desktop layout layer — prefer explicit upload/download or clipboard flows when in doubt.
 - Limited automated coverage beyond unit tests; soak-test on real hosts before critical use.
 
 ---
