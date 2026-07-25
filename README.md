@@ -66,7 +66,7 @@ Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP 
 - Upload / download prompts; recursive directory transfers supported in the transfer engine
 
 ### Viewer & Editor
-- Viewer: text, hex preview for binary, half-block **image** preview
+- Viewer: text, hex preview for binary, **braille** image preview (high-density Unicode)
 - Editor: edit remote text, **Ctrl+S** save-back over SFTP; dirty Esc confirm
 
 ### Transfers

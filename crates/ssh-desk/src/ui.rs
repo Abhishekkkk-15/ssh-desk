@@ -1424,7 +1424,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     if !viewer.is_open() {
         frame.render_widget(
             Paragraph::new(
-                "Open a file from Files (Enter).\nImages use half-block preview.\ne open in editor · Esc closes.",
+                "Open a file from Files (Enter).\nImages use braille preview (sharp Unicode art).\ne open in editor · Esc closes.",
             ),
             area,
         );
@@ -1451,7 +1451,12 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
             let spans: Vec<Span> = row
                 .iter()
                 .take(max_cols)
-                .map(|cell| Span::styled("▀", Style::default().fg(cell.fg).bg(cell.bg)))
+                .map(|cell| {
+                    Span::styled(
+                        cell.glyph.to_string(),
+                        Style::default().fg(cell.fg).bg(cell.bg),
+                    )
+                })
                 .collect();
             // Center horizontally when the raster is narrower than the pane.
             let row_cols = spans.len();
