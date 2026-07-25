@@ -237,7 +237,7 @@ impl App {
             slot.editor.clear();
             slot.processes = if online { ProcessesState::default() } else { ProcessesState::demo() };
             slot.demo_term = if online {
-                String::new()
+                format!("Connected to '{}'.\nReady.\n", profile.name)
             } else {
                 format!("Reconnect failed. Offline/demo mode.\n")
             };
@@ -246,7 +246,12 @@ impl App {
         } else {
             let mut slot = SessionSlot::new(profile.id.clone(), profile.name.clone(), online);
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
-            if !online {
+            if online {
+                slot.demo_term = format!(
+                    "Connected to '{}'.\nReady.\n",
+                    profile.name
+                );
+            } else {
                 slot.demo_term = format!(
                     "Connection failed.\n\
                      Desktop for '{}' running in offline/demo mode.\n\
