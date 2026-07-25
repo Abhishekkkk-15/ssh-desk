@@ -62,7 +62,11 @@ impl RemoteEntry {
             return "—".into();
         };
         // Local formatting without chrono dep: YYYY-MM-DD HH:MM via simple UTC math.
-        format_unix_mtime(dt.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+        format_unix_mtime(
+            dt.duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
     }
 }
 
@@ -131,7 +135,11 @@ impl RemoteFileContent {
                     }
                 })
                 .collect();
-            out.push_str(&format!("{offset:08x}  {:<47}  |{}|\n", hex.join(" "), ascii));
+            out.push_str(&format!(
+                "{offset:08x}  {:<47}  |{}|\n",
+                hex.join(" "),
+                ascii
+            ));
         }
         out
     }
@@ -158,11 +166,7 @@ pub fn join_remote(cwd: &Path, name: &str) -> PathBuf {
 /// Normalize path string for SFTP (forward slashes).
 pub fn remote_path_string(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
-    if s.is_empty() {
-        "/".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "/".into() } else { s }
 }
 
 #[cfg(test)]

@@ -43,7 +43,10 @@ impl DragSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropTarget {
     /// Remote or local folder in the Files app.
-    Folder { pane_hint: String, path: PathBuf },
+    Folder {
+        pane_hint: String,
+        path: PathBuf,
+    },
     TransferDock,
     /// Unknown / ask the user.
     Ask,

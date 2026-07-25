@@ -151,12 +151,7 @@ impl Vault {
     }
 
     pub fn upsert(&mut self, profile: HostProfile) -> Result<(), VaultError> {
-        if let Some(existing) = self
-            .data
-            .hosts
-            .iter_mut()
-            .find(|h| h.id == profile.id)
-        {
+        if let Some(existing) = self.data.hosts.iter_mut().find(|h| h.id == profile.id) {
             *existing = profile;
         } else {
             self.data.hosts.push(profile);
@@ -207,14 +202,11 @@ impl Vault {
     }
 
     /// Decrypt a stored password (caller should zeroize when done).
-    pub fn load_password(
-        &self,
-        secret_file: &str,
-        passphrase: &str,
-    ) -> Result<String, VaultError> {
+    pub fn load_password(&self, secret_file: &str, passphrase: &str) -> Result<String, VaultError> {
         let path = self.path.secrets_dir().join(secret_file);
         let bytes = fs::read(path)?;
-        let decryptor = Decryptor::new(&bytes[..]).map_err(|e| VaultError::Crypto(e.to_string()))?;
+        let decryptor =
+            Decryptor::new(&bytes[..]).map_err(|e| VaultError::Crypto(e.to_string()))?;
         let mut reader = decryptor
             .decrypt(std::iter::once(
                 &age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()))

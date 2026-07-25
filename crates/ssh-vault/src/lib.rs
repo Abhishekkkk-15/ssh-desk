@@ -2,4 +2,4 @@
 
 mod store;
 
-pub use store::{zeroize_string, AuthMethod, HostProfile, Vault, VaultError, VaultPath};
+pub use store::{AuthMethod, HostProfile, Vault, VaultError, VaultPath, zeroize_string};

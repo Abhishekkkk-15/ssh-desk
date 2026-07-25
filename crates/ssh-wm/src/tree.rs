@@ -120,10 +120,7 @@ impl PaneNode {
         match self {
             Self::Leaf { id: leaf_id, .. } if *leaf_id == id => Some(self),
             Self::Leaf { .. } => None,
-            Self::Split(s) => s
-                .first
-                .find_mut(id)
-                .or_else(|| s.second.find_mut(id)),
+            Self::Split(s) => s.first.find_mut(id).or_else(|| s.second.find_mut(id)),
         }
     }
 
@@ -169,7 +166,8 @@ impl PaneNode {
             Self::Leaf { .. } => None,
             Self::Split(s) => {
                 let first_hit = matches!(s.first.as_ref(), Self::Leaf { id, .. } if *id == target);
-                let second_hit = matches!(s.second.as_ref(), Self::Leaf { id, .. } if *id == target);
+                let second_hit =
+                    matches!(s.second.as_ref(), Self::Leaf { id, .. } if *id == target);
 
                 if first_hit {
                     let sibling = std::mem::replace(
@@ -299,9 +297,9 @@ impl PaneTree {
         ratio: f32,
         new_app: AppKind,
     ) -> Option<NodeId> {
-        let new_id =
-            self.root
-                .replace_leaf_with_split(target, direction, ratio, new_app)?;
+        let new_id = self
+            .root
+            .replace_leaf_with_split(target, direction, ratio, new_app)?;
         self.focused = new_id;
         Some(new_id)
     }
@@ -327,10 +325,7 @@ impl PaneTree {
         self.focused = if leaves.iter().any(|(lid, _)| *lid == next_focus) {
             next_focus
         } else {
-            leaves
-                .first()
-                .map(|(lid, _)| *lid)
-                .unwrap_or(next_focus)
+            leaves.first().map(|(lid, _)| *lid).unwrap_or(next_focus)
         };
         Ok(self.focused)
     }

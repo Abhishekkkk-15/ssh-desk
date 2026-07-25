@@ -22,9 +22,9 @@ pub fn sniff_open_action(path: &Path) -> OpenAction {
 
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => OpenAction::PreviewImage,
-        "rs" | "toml" | "md" | "txt" | "json" | "yaml" | "yml" | "py" | "js" | "ts"
-        | "go" | "c" | "h" | "cpp" | "hpp" | "sh" | "bash" | "zsh" | "css" | "html" | "xml"
-        | "ini" | "cfg" | "conf" | "log" | "env" | "svg" => OpenAction::EditText,
+        "rs" | "toml" | "md" | "txt" | "json" | "yaml" | "yml" | "py" | "js" | "ts" | "go"
+        | "c" | "h" | "cpp" | "hpp" | "sh" | "bash" | "zsh" | "css" | "html" | "xml" | "ini"
+        | "cfg" | "conf" | "log" | "env" | "svg" => OpenAction::EditText,
         "bin" | "so" | "o" | "a" | "exe" | "dll" | "wasm" => OpenAction::Hex,
         _ => OpenAction::ViewText,
     }
@@ -45,9 +45,6 @@ mod tests {
             sniff_open_action(&PathBuf::from("x.PNG")),
             OpenAction::PreviewImage
         );
-        assert_eq!(
-            sniff_open_action(&PathBuf::from("lib.so")),
-            OpenAction::Hex
-        );
+        assert_eq!(sniff_open_action(&PathBuf::from("lib.so")), OpenAction::Hex);
     }
 }

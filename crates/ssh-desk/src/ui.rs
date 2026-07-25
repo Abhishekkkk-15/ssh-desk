@@ -2,16 +2,17 @@
 
 use std::path::PathBuf;
 
+use crate::theme::Theme as Th;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use crate::theme::Theme as Th;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-use ratatui::Frame;
 use ssh_os::{DragPayload, DragSession, DropTarget, OsDropOffer};
 use ssh_vault::HostProfile;
 use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 
+use crate::app::OverwritePrompt;
 use crate::apps::{EditorState, ProcessesState};
 use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
@@ -19,7 +20,6 @@ use crate::files_prompt::FilesPrompt;
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::term::TermEmulator;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
-use crate::app::OverwritePrompt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenKind {
@@ -64,10 +64,7 @@ pub struct UiFrame<'a> {
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let area = frame.area();
     // Soft slate canvas (avoid pure pitch-black).
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Th::BG)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(Th::BG)), area);
     if model.screen == ScreenKind::Desktop && model.full_screen {
         if let Some(desktop) = model.desktop {
             draw_desktop(frame, area, desktop, model);
@@ -179,9 +176,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             ));
             spans.push(Span::styled(
                 " remote OS shell",
-                Style::default()
-                    .fg(Th::FG_MUTED)
-                    .bg(Th::CHROME),
+                Style::default().fg(Th::FG_MUTED).bg(Th::CHROME),
             ));
         }
         ScreenKind::Desktop => {
@@ -218,9 +213,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                             .bg(Th::OK)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default()
-                            .fg(Th::FG_DIM)
-                            .bg(Th::CHROME)
+                        Style::default().fg(Th::FG_DIM).bg(Th::CHROME)
                     };
                     spans.push(Span::styled(label, style));
                 }
@@ -229,9 +222,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 if area.width as usize > total_chars + 36 {
                     spans.push(Span::styled(
                         " │ Ctrl+Tab · F8 · Ctrl+W ",
-                        Style::default()
-                            .fg(Th::FG_DIM)
-                            .bg(Th::CHROME),
+                        Style::default().fg(Th::FG_DIM).bg(Th::CHROME),
                     ));
                 }
             }
@@ -252,7 +243,12 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let height = (model.sessions.len() as u16 + 4).min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let rect = Rect { x, y, width, height };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     frame.render_widget(Clear, rect);
 
@@ -261,7 +257,11 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let marker = if i == model.active_session_idx { "▶ " } else { "  " };
+            let marker = if i == model.active_session_idx {
+                "▶ "
+            } else {
+                "  "
+            };
             let key = if i < 9 { (b'1' + i as u8) as char } else { ' ' };
             let label = format!("{marker}[{key}] {name}");
             let style = if i == model.active_session_idx {
@@ -299,16 +299,22 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         .iter()
         .enumerate()
         .map(|(i, h)| {
-            let marker = if i == model.selected_host { "●" } else { "○" };
-            let jump = h.jump_via.as_deref().map(|j| format!(" via:{j}")).unwrap_or_default();
+            let marker = if i == model.selected_host {
+                "●"
+            } else {
+                "○"
+            };
+            let jump = h
+                .jump_via
+                .as_deref()
+                .map(|j| format!(" via:{j}"))
+                .unwrap_or_default();
             let line = format!(
                 " {marker} {}  {}@{}:{}{}",
                 h.name, h.user, h.host, h.port, jump
             );
             let style = if i == model.selected_host {
-                Style::default()
-                    .fg(Th::ACCENT)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -395,9 +401,7 @@ fn draw_pane_leaf(
     model: &UiFrame<'_>,
 ) {
     let border = if drop_hot {
-        Style::default()
-            .fg(Th::WARN)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Th::WARN).add_modifier(Modifier::BOLD)
     } else if focused {
         Style::default().fg(Th::ACCENT)
     } else {
@@ -449,10 +453,7 @@ fn draw_pane_header(
 
     let mut spans = vec![Span::styled(
         format!(" {name}{focus_mark} "),
-        Style::default()
-            .fg(fg)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
     )];
 
     if !detail.is_empty() {
@@ -492,9 +493,7 @@ fn pane_header_parts(app: AppKind, model: &UiFrame<'_>) -> (String, String) {
                 format!("{n} jobs")
             }
         }
-        AppKind::Terminal if model.fullscreen_app == Some(AppKind::Terminal) => {
-            "fullscreen".into()
-        }
+        AppKind::Terminal if model.fullscreen_app == Some(AppKind::Terminal) => "fullscreen".into(),
         _ => String::new(),
     };
     (name, detail)
@@ -564,9 +563,7 @@ fn draw_files(
             "  {:<10} {:>8}  {:<16}  {}",
             "MODE", "SIZE", "MODIFIED", "NAME"
         ),
-        Style::default()
-            .fg(Th::FG_DIM)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Th::FG_DIM).add_modifier(Modifier::BOLD),
     )));
 
     let prefix = lines.len();
@@ -845,9 +842,7 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {spin}  connecting to {}…", prompt.host_name),
-                Style::default()
-                    .fg(Th::ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -908,9 +903,7 @@ fn draw_connecting_overlay(frame: &mut Frame<'_>, area: Rect, host: &str, spinne
         Line::from(""),
         Line::from(Span::styled(
             format!("  {spin}  connecting to {host}…"),
-            Style::default()
-                .fg(Th::ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -971,9 +964,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
             Line::from(Span::styled(
                 format!("> {}", prompt.buffer),
                 if prompt.editing {
-                    Style::default()
-                        .fg(Th::ON_ACCENT)
-                        .bg(Th::ACCENT)
+                    Style::default().fg(Th::ON_ACCENT).bg(Th::ACCENT)
                 } else {
                     Style::default().fg(Th::FG)
                 },
@@ -1025,9 +1016,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
 
     frame.render_widget(
         Paragraph::new(match prompt.kind {
-            PathPromptKind::Upload => {
-                "Enter pick file · Tab/e edit path · Esc cancel".to_string()
-            }
+            PathPromptKind::Upload => "Enter pick file · Tab/e edit path · Esc cancel".to_string(),
             PathPromptKind::Download => {
                 "Enter overwrite file · s save here · Tab/e edit · Esc".to_string()
             }
@@ -1150,10 +1139,7 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
         // Compact clock: last 5 digits of epoch seconds is enough as relative marker.
         let clock = entry.ts_secs % 100_000;
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{clock:05} ",),
-                Style::default().fg(Th::FG_DIM),
-            ),
+            Span::styled(format!("{clock:05} ",), Style::default().fg(Th::FG_DIM)),
             Span::styled(
                 format!("[{}] ", entry.level.tag()),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1238,7 +1224,9 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
 fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
     let width = area.width.min(64).max(40);
     let height = match prompt {
-        FilesPrompt::Delete { names, .. } => (9 + names.len().min(4) as u16).min(area.height).max(8),
+        FilesPrompt::Delete { names, .. } => {
+            (9 + names.len().min(4) as u16).min(area.height).max(8)
+        }
         _ => 9u16.min(area.height).max(7),
     };
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -1303,9 +1291,7 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
             )));
         }
         FilesPrompt::Delete {
-            names,
-            selected,
-            ..
+            names, selected, ..
         } => {
             lines.push(Line::from(Span::styled(
                 "Permanently delete the following?",
@@ -1358,9 +1344,9 @@ fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&Dr
                 .first()
                 .and_then(|f| match &f.location {
                     ssh_os::FileLocation::Remote { path, .. }
-                    | ssh_os::FileLocation::Local { path } => path
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned()),
+                    | ssh_os::FileLocation::Local { path } => {
+                        path.file_name().map(|s| s.to_string_lossy().into_owned())
+                    }
                 })
                 .unwrap_or_else(|| "file".into());
             if files.len() > 1 {
@@ -1415,21 +1401,14 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     if let ViewerKind::Image(preview) = &viewer.kind {
         let mut lines = vec![Line::from(Span::styled(
             format!("{}  {}", viewer.title, preview.meta),
-            Style::default()
-                .fg(Th::INFO)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Th::INFO).add_modifier(Modifier::BOLD),
         ))];
         let max = area.height.saturating_sub(1) as usize;
         let start = (viewer.scroll as usize).min(preview.rows.len().saturating_sub(1));
         for row in preview.rows.iter().skip(start).take(max) {
             let spans: Vec<Span> = row
                 .iter()
-                .map(|cell| {
-                    Span::styled(
-                        "▀",
-                        Style::default().fg(cell.fg).bg(cell.bg),
-                    )
-                })
+                .map(|cell| Span::styled("▀", Style::default().fg(cell.fg).bg(cell.bg)))
                 .collect();
             lines.push(Line::from(spans));
         }
@@ -1456,9 +1435,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
 
     let mut lines = vec![Line::from(Span::styled(
         header,
-        Style::default()
-            .fg(Th::INFO)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Th::INFO).add_modifier(Modifier::BOLD),
     ))];
     for line in slice {
         lines.push(Line::from(line.to_string()));
@@ -1480,15 +1457,10 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &Editor
 
     let dirty = if editor.dirty { " *" } else { "" };
     let mode = if editor.online { "" } else { " [demo]" };
-    let header = format!(
-        "{}{}{}  · Ctrl+S save · Esc",
-        editor.title, dirty, mode
-    );
+    let header = format!("{}{}{}  · Ctrl+S save · Esc", editor.title, dirty, mode);
     let mut lines = vec![Line::from(Span::styled(
         header,
-        Style::default()
-            .fg(Th::WARN)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Th::WARN).add_modifier(Modifier::BOLD),
     ))];
 
     let max = area.height.saturating_sub(1) as usize;
@@ -1539,10 +1511,11 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
         lines.push(Line::from("loading…"));
     }
     lines.push(Line::from(Span::styled(
-        format!("{:<7} {:<8} {:>5} {:>5}  COMMAND", "PID", "USER", "%CPU", "%MEM"),
-        Style::default()
-            .fg(Th::FG_DIM)
-            .add_modifier(Modifier::BOLD),
+        format!(
+            "{:<7} {:<8} {:>5} {:>5}  COMMAND",
+            "PID", "USER", "%CPU", "%MEM"
+        ),
+        Style::default().fg(Th::FG_DIM).add_modifier(Modifier::BOLD),
     )));
 
     let visible = area.height.saturating_sub(lines.len() as u16) as usize;
@@ -1605,9 +1578,7 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else if is_open {
-            Style::default()
-                .fg(Th::FG_MUTED)
-                .bg(Th::CHROME)
+            Style::default().fg(Th::FG_MUTED).bg(Th::CHROME)
         } else {
             // Closed / available to open
             Style::default()
@@ -1625,9 +1596,7 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     if model.clipboard_has_files {
         spans.push(Span::styled(
             format!(" [clipboard:{}] ", model.clipboard_label),
-            Style::default()
-                .fg(Th::INFO)
-                .bg(Th::CHROME),
+            Style::default().fg(Th::INFO).bg(Th::CHROME),
         ));
     }
     frame.render_widget(
@@ -1638,16 +1607,11 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
-        ScreenKind::Launcher => "a add · F9 log · Enter connect · q quit",
-        ScreenKind::Desktop => {
-            "Ctrl+Space pane · F2–F7 open · Ctrl+W close · Esc session"
-        }
+        ScreenKind::Launcher => "a add · F9 log · Enter connect · Ctrl+Q quit",
+        ScreenKind::Desktop => "Ctrl+Space pane · F2–F7 open · Ctrl+W close · Ctrl+Q quit",
     };
     let line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", model.status),
-            Style::default().fg(Th::FG),
-        ),
+        Span::styled(format!(" {} ", model.status), Style::default().fg(Th::FG)),
         Span::styled("│ ", Style::default().fg(Th::FG_DIM)),
         Span::styled(help, Style::default().fg(Th::FG_DIM)),
     ]);

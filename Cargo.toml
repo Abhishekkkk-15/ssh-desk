@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["ssh-desk contributors"]
-repository = "https://github.com/example/ssh-desk"
+repository = "https://github.com/Abhishekkkk-15/ssh-desk"
 
 [workspace.dependencies]
 ssh-core = { path = "crates/ssh-core" }

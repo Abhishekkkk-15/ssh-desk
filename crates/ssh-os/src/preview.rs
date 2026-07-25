@@ -37,9 +37,7 @@ impl HalfblockPreview {
         // Ensure even height for pairing.
         let nh = nh + (nh % 2);
 
-        let rgba: RgbaImage = img
-            .resize_exact(nw, nh, FilterType::Triangle)
-            .to_rgba8();
+        let rgba: RgbaImage = img.resize_exact(nw, nh, FilterType::Triangle).to_rgba8();
 
         let cell_rows = (nh / 2) as u16;
         let cell_cols = nw as u16;

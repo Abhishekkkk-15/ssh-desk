@@ -155,11 +155,7 @@ impl PathPrompt {
                 let path = e.path();
                 let is_dir = path.is_dir();
                 let name = e.file_name().to_string_lossy().into_owned();
-                LocalEntry {
-                    name,
-                    path,
-                    is_dir,
-                }
+                LocalEntry { name, path, is_dir }
             })
             .collect();
         entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {

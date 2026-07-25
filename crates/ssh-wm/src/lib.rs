@@ -37,6 +37,10 @@ impl Desktop {
         let _ = tree.split(root, Direction::Horizontal, 0.7, AppKind::Processes);
         let _ = tree.split(right, Direction::Horizontal, 0.65, AppKind::Transfers);
 
+        Self::with_tree(id, title, tree)
+    }
+
+    pub fn with_tree(id: impl Into<String>, title: impl Into<String>, tree: PaneTree) -> Self {
         Self {
             id: DesktopId::new(id),
             title: title.into(),

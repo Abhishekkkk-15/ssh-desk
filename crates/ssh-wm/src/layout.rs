@@ -44,10 +44,7 @@ impl Layout {
             .copied()
             .or_else(|| leaves.first().copied())
             .unwrap_or_else(NodeId::new);
-        PaneTree {
-            root,
-            focused,
-        }
+        PaneTree { root, focused }
     }
 
     fn into_node(self) -> (PaneNode, Vec<NodeId>) {

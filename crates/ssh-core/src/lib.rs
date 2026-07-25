@@ -9,9 +9,9 @@ mod transfer;
 
 pub use client::{SessionEvent, SessionHub};
 pub use error::CoreError;
-pub use fs::{join_remote, remote_path_string, RemoteEntry, RemoteFileContent};
+pub use fs::{RemoteEntry, RemoteFileContent, join_remote, remote_path_string};
 pub use known_hosts::default_known_hosts_path;
 pub use pty::{PtyId, PtyOutput, PtySession};
 pub use transfer::{
-    format_bytes, format_rate, TransferDirection, TransferId, TransferJob, TransferStatus,
+    TransferDirection, TransferId, TransferJob, TransferStatus, format_bytes, format_rate,
 };

@@ -2751,6 +2751,8 @@ dependencies = [
  "crossterm",
  "dirs",
  "ratatui",
+ "serde",
+ "serde_json",
  "ssh-core",
  "ssh-os",
  "ssh-vault",

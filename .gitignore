@@ -19,7 +19,7 @@ cursor_advanced_ssh_tui_design.md
 *.key
 !crates/**/testdata/**
 
-# Runtime logs
+# Runtime logs (cwd leftovers + XDG state)
 ssh-desk.log
 *.log
 

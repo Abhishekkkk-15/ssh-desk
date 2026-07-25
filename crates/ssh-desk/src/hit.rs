@@ -215,7 +215,13 @@ fn files_row_hits(area: Rect, files: &FilesState) -> Vec<FilesRowHit> {
     let start = files.selected.saturating_sub(visible.saturating_sub(1));
 
     let mut hits = Vec::new();
-    for (vis_i, (idx, row)) in rows.iter().enumerate().skip(start).take(visible).enumerate() {
+    for (vis_i, (idx, row)) in rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .enumerate()
+    {
         let y = area.y + y_off + vis_i as u16;
         if y >= area.y + area.height {
             break;

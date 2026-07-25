@@ -4,18 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use russh::client::{self, Handle};
-use russh::keys::load_secret_key;
 use russh::keys::PrivateKeyWithHashAlg;
+use russh::keys::load_secret_key;
 use russh::{Channel, ChannelMsg};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use ssh_vault::{AuthMethod, HostProfile, Vault};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use crate::error::CoreError;
-use crate::fs::{remote_path_string, RemoteEntry, RemoteFileContent};
+use crate::fs::{RemoteEntry, RemoteFileContent, remote_path_string};
 use crate::known_hosts::{default_known_hosts_path, verify_server_key};
 use crate::pty::{PtyId, PtyOutput, PtySession};
 use crate::transfer::{TransferDirection, TransferId, TransferJob, TransferStatus};
@@ -51,12 +51,7 @@ impl client::Handler for ClientHandler {
         &mut self,
         server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        match verify_server_key(
-            &self.host,
-            self.port,
-            server_public_key,
-            &self.known_hosts,
-        ) {
+        match verify_server_key(&self.host, self.port, server_public_key, &self.known_hosts) {
             Ok(ok) => Ok(ok),
             Err(e) => {
                 if let Ok(mut g) = self.reject_reason.lock() {
@@ -353,7 +348,11 @@ impl SessionHub {
         Ok(PathBuf::from(abs))
     }
 
-    pub async fn list_dir(&self, host_id: &str, path: &Path) -> Result<Vec<RemoteEntry>, CoreError> {
+    pub async fn list_dir(
+        &self,
+        host_id: &str,
+        path: &Path,
+    ) -> Result<Vec<RemoteEntry>, CoreError> {
         let sessions = self.sessions.lock().await;
         let session = sessions
             .iter()
@@ -617,17 +616,8 @@ impl SessionHub {
         let hub = Arc::clone(self);
         let host_id = host_id.to_owned();
         tokio::spawn(async move {
-            let result = run_upload_tree(
-                sftp,
-                local_dir,
-                remote_root,
-                files,
-                cancel,
-                &hub,
-                id,
-                cut,
-            )
-            .await;
+            let result =
+                run_upload_tree(sftp, local_dir, remote_root, files, cancel, &hub, id, cut).await;
             if let Err(e) = &result {
                 let _ = hub
                     .events_tx
@@ -661,10 +651,7 @@ impl SessionHub {
     ) -> Result<TransferId, CoreError> {
         let sftp = self.sftp_arc(host_id).await?;
         let meta = sftp.metadata(remote_path_string(&remote_path)).await.ok();
-        let is_dir = meta
-            .as_ref()
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
         if is_dir {
             return self
                 .enqueue_download_tree(host_id, remote_path, local_path, cut)
@@ -730,8 +717,7 @@ impl SessionHub {
         let hub = Arc::clone(self);
         tokio::spawn(async move {
             let result =
-                run_download_tree(sftp, remote_dir, local_path, files, cancel, &hub, id, cut)
-                    .await;
+                run_download_tree(sftp, remote_dir, local_path, files, cancel, &hub, id, cut).await;
             hub.finish_transfer(id, result).await;
         });
         Ok(id)
@@ -1240,10 +1226,7 @@ async fn auth_private_key(
         .map_err(|e| CoreError::Auth(e.to_string()))?
         .flatten();
     let result = handle
-        .authenticate_publickey(
-            user,
-            PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
-        )
+        .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg))
         .await
         .map_err(|e| CoreError::Auth(e.to_string()))?;
     if result.success() {
@@ -1329,9 +1312,10 @@ async fn ensure_remote_dir(sftp: &SftpSession, path: &Path) -> Result<(), CoreEr
                 )));
             }
             Err(_) => {
-                let _ = sftp.create_dir(&s).await.map_err(|e| {
-                    CoreError::Sftp(format!("mkdir {s}: {e}"))
-                })?;
+                let _ = sftp
+                    .create_dir(&s)
+                    .await
+                    .map_err(|e| CoreError::Sftp(format!("mkdir {s}: {e}")))?;
             }
         }
     }

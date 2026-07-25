@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ssh_core::{join_remote, remote_path_string, RemoteEntry, RemoteFileContent};
-use ssh_os::{sniff_open_action, HalfblockPreview, OpenAction};
+use ssh_core::{RemoteEntry, RemoteFileContent, join_remote, remote_path_string};
+use ssh_os::{HalfblockPreview, OpenAction, sniff_open_action};
 
 #[derive(Debug, Clone)]
 pub struct FilesState {
