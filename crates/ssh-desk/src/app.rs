@@ -1248,10 +1248,6 @@ impl App {
             self.session_prev();
             return Ok(());
         }
-        if ctrl && key.code == KeyCode::Char('w') {
-            self.close_current_session().await?;
-            return Ok(());
-        }
         if key.code == KeyCode::F(8) {
             self.show_session_switcher = !self.show_session_switcher;
             return Ok(());
@@ -1395,64 +1391,146 @@ impl App {
             return Ok(());
         }
 
+        // Layout / dock keys — short borrow so status can update freely.
+        let (layout_status, refresh_procs) = {
+            let Some(desktop) = self.desktop_mut() else {
+                return Ok(());
+            };
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
+                    self.should_quit = true;
+                    return Ok(());
+                }
+                (_, KeyCode::Tab) => {
+                    desktop.focus_next();
+                    return Ok(());
+                }
+                (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                    desktop.focus_prev();
+                    return Ok(());
+                }
+                (_, KeyCode::F(2)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Files);
+                    (
+                        Some(if opened {
+                            "opened files · right of focus".into()
+                        } else {
+                            "files".into()
+                        }),
+                        false,
+                    )
+                }
+                (_, KeyCode::F(3)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Terminal);
+                    (
+                        Some(if opened {
+                            "opened shell · right of focus".into()
+                        } else {
+                            "shell".into()
+                        }),
+                        false,
+                    )
+                }
+                (_, KeyCode::F(4)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Processes);
+                    (
+                        Some(if opened {
+                            "opened processes · right of focus".into()
+                        } else {
+                            "processes".into()
+                        }),
+                        true,
+                    )
+                }
+                (_, KeyCode::F(5)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Transfers);
+                    (
+                        Some(if opened {
+                            "opened transfers · right of focus".into()
+                        } else {
+                            "transfers".into()
+                        }),
+                        false,
+                    )
+                }
+                (_, KeyCode::F(6)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Viewer);
+                    (
+                        Some(if opened {
+                            "opened viewer · right of focus".into()
+                        } else {
+                            "viewer".into()
+                        }),
+                        false,
+                    )
+                }
+                (_, KeyCode::F(7)) => {
+                    let opened = desktop.tree.focus_or_open(AppKind::Editor);
+                    (
+                        Some(if opened {
+                            "opened editor · right of focus".into()
+                        } else {
+                            "editor".into()
+                        }),
+                        false,
+                    )
+                }
+                (mods, KeyCode::Char(c))
+                    if mods.contains(KeyModifiers::CONTROL)
+                        && matches!(c, 'w' | 'W')
+                        && !mods.contains(KeyModifiers::ALT) =>
+                {
+                    // Ctrl+W closes the focused pane. (Ctrl+Shift+W is often
+                    // swallowed by the host terminal; plain Ctrl+W is reliable.)
+                    let app = desktop.focused_app();
+                    (
+                        Some(match desktop.tree.close_focused() {
+                            Ok(_) => format!("closed {} · sibling expanded", app.label()),
+                            Err(ssh_wm::ClosePaneError::LastPane) => {
+                                "cannot close the last pane".into()
+                            }
+                            Err(ssh_wm::ClosePaneError::NotFound) => "pane not found".into(),
+                        }),
+                        false,
+                    )
+                }
+                (_, KeyCode::F(10)) => {
+                    let app = desktop.focused_app();
+                    (
+                        Some(match desktop.tree.close_focused() {
+                            Ok(_) => format!("closed {} · sibling expanded", app.label()),
+                            Err(ssh_wm::ClosePaneError::LastPane) => {
+                                "cannot close the last pane".into()
+                            }
+                            Err(ssh_wm::ClosePaneError::NotFound) => "pane not found".into(),
+                        }),
+                        false,
+                    )
+                }
+                (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                    let _ = desktop.tree.split_focused(Direction::Vertical, 0.5, AppKind::Files);
+                    (Some("split · files to the right".into()), false)
+                }
+                (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+                    let _ = desktop
+                        .tree
+                        .split_focused(Direction::Horizontal, 0.5, AppKind::Terminal);
+                    (Some("split · shell below".into()), false)
+                }
+                _ => (None, false),
+            }
+        };
+        if let Some(msg) = layout_status {
+            self.status = msg;
+            if refresh_procs {
+                let _ = self.refresh_processes().await;
+            }
+            return Ok(());
+        }
+
         let Some(desktop) = self.desktop_mut() else {
             return Ok(());
         };
-
-        let mut refresh_procs = false;
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
-                self.should_quit = true;
-                return Ok(());
-            }
-            (_, KeyCode::Tab) => {
-                desktop.focus_next();
-                return Ok(());
-            }
-            (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-                desktop.focus_prev();
-                return Ok(());
-            }
-            (_, KeyCode::F(2)) => {
-                desktop.tree.set_focused_app(AppKind::Files);
-                return Ok(());
-            }
-            (_, KeyCode::F(3)) => {
-                desktop.tree.set_focused_app(AppKind::Terminal);
-                return Ok(());
-            }
-            (_, KeyCode::F(4)) => {
-                desktop.tree.set_focused_app(AppKind::Processes);
-                refresh_procs = true;
-            }
-            (_, KeyCode::F(5)) => {
-                desktop.tree.set_focused_app(AppKind::Transfers);
-                return Ok(());
-            }
-            (_, KeyCode::F(6)) => {
-                desktop.tree.focus_or_open_viewer();
-                return Ok(());
-            }
-            (_, KeyCode::F(7)) => {
-                desktop.tree.focus_or_open_editor();
-                return Ok(());
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
-                let _ = desktop.tree.split_focused(Direction::Vertical, 0.5, AppKind::Files);
-                return Ok(());
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
-                let _ = desktop
-                    .tree
-                    .split_focused(Direction::Horizontal, 0.5, AppKind::Terminal);
-                return Ok(());
-            }
-            _ => {}
-        }
-        if refresh_procs {
-            let _ = self.refresh_processes().await;
-            return Ok(());
-        }
 
         let focused = desktop.focused_app();
         match focused {

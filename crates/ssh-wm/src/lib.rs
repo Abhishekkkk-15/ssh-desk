@@ -4,7 +4,7 @@ mod layout;
 mod tree;
 
 pub use layout::{Layout, SavedLayout};
-pub use tree::{AppKind, Direction, NodeId, PaneNode, PaneTree, Split};
+pub use tree::{AppKind, ClosePaneError, Direction, NodeId, PaneNode, PaneTree, Split};
 
 use serde::{Deserialize, Serialize};
 

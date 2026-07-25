@@ -56,6 +56,14 @@ impl AppKind {
     }
 }
 
+/// Why a pane could not be closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosePaneError {
+    /// Refusing to close the only remaining pane.
+    LastPane,
+    NotFound,
+}
+
 /// Split axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
@@ -154,6 +162,47 @@ impl PaneNode {
                 }),
         }
     }
+
+    /// Remove `target` leaf; promote its sibling. Returns the sibling to focus.
+    fn remove_leaf(&mut self, target: NodeId) -> Option<NodeId> {
+        match self {
+            Self::Leaf { .. } => None,
+            Self::Split(s) => {
+                let first_hit = matches!(s.first.as_ref(), Self::Leaf { id, .. } if *id == target);
+                let second_hit = matches!(s.second.as_ref(), Self::Leaf { id, .. } if *id == target);
+
+                if first_hit {
+                    let sibling = std::mem::replace(
+                        &mut s.second,
+                        Box::new(Self::Leaf {
+                            id: NodeId::new(),
+                            app: AppKind::Terminal,
+                        }),
+                    );
+                    let focus = sibling.leaves().first().map(|(id, _)| *id);
+                    *self = *sibling;
+                    return focus;
+                }
+                if second_hit {
+                    let sibling = std::mem::replace(
+                        &mut s.first,
+                        Box::new(Self::Leaf {
+                            id: NodeId::new(),
+                            app: AppKind::Terminal,
+                        }),
+                    );
+                    let focus = sibling.leaves().first().map(|(id, _)| *id);
+                    *self = *sibling;
+                    return focus;
+                }
+
+                if let Some(focus) = s.first.remove_leaf(target) {
+                    return Some(focus);
+                }
+                s.second.remove_leaf(target)
+            }
+        }
+    }
 }
 
 /// Owned pane tree with focus tracking.
@@ -203,6 +252,17 @@ impl PaneTree {
 
     pub fn leaves(&self) -> Vec<(NodeId, AppKind)> {
         self.root.leaves()
+    }
+
+    pub fn has_app(&self, app: AppKind) -> bool {
+        self.leaves().iter().any(|(_, a)| *a == app)
+    }
+
+    pub fn find_app(&self, app: AppKind) -> Option<NodeId> {
+        self.leaves()
+            .into_iter()
+            .find(|(_, a)| *a == app)
+            .map(|(id, _)| id)
     }
 
     pub fn focus_next(&mut self) {
@@ -255,6 +315,30 @@ impl PaneTree {
         self.split(self.focused, direction, ratio, new_app)
     }
 
+    /// Close a leaf pane; sibling expands. Focus moves to the sibling subtree.
+    pub fn close(&mut self, id: NodeId) -> Result<NodeId, ClosePaneError> {
+        if matches!(&self.root, PaneNode::Leaf { .. }) {
+            return Err(ClosePaneError::LastPane);
+        }
+        let Some(next_focus) = self.root.remove_leaf(id) else {
+            return Err(ClosePaneError::NotFound);
+        };
+        let leaves = self.leaves();
+        self.focused = if leaves.iter().any(|(lid, _)| *lid == next_focus) {
+            next_focus
+        } else {
+            leaves
+                .first()
+                .map(|(lid, _)| *lid)
+                .unwrap_or(next_focus)
+        };
+        Ok(self.focused)
+    }
+
+    pub fn close_focused(&mut self) -> Result<NodeId, ClosePaneError> {
+        self.close(self.focused)
+    }
+
     pub fn set_app(&mut self, id: NodeId, app: AppKind) {
         if let Some(PaneNode::Leaf { app: slot, .. }) = self.root.find_mut(id) {
             *slot = app;
@@ -265,26 +349,78 @@ impl PaneTree {
         self.set_app(self.focused, app);
     }
 
-    /// Focus an existing Viewer pane, or turn a spare pane into one / split.
+    /// Focus `app` if already open; otherwise open it to the **right** of the focused pane.
+    /// Returns `true` when a new pane was created.
+    pub fn focus_or_open(&mut self, app: AppKind) -> bool {
+        if let Some(id) = self.find_app(app) {
+            self.focused = id;
+            return false;
+        }
+        self.split_focused(Direction::Vertical, 0.5, app).is_some()
+    }
+
+    /// Focus an existing Viewer pane, or open one beside the focused pane.
     pub fn focus_or_open_viewer(&mut self) {
-        self.focus_or_open_app(AppKind::Viewer, AppKind::Processes);
+        let _ = self.focus_or_open(AppKind::Viewer);
     }
 
-    /// Focus an existing Editor pane, or convert Viewer / split.
+    /// Focus an existing Editor pane, or open one beside the focused pane.
     pub fn focus_or_open_editor(&mut self) {
-        self.focus_or_open_app(AppKind::Editor, AppKind::Viewer);
+        let _ = self.focus_or_open(AppKind::Editor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_promotes_sibling() {
+        let mut tree = PaneTree::new(AppKind::Terminal);
+        let root = tree.root();
+        let files = tree
+            .split(root, Direction::Vertical, 0.5, AppKind::Files)
+            .unwrap();
+        assert_eq!(tree.leaves().len(), 2);
+        tree.close(files).unwrap();
+        assert_eq!(tree.leaves().len(), 1);
+        assert_eq!(tree.focused_app(), AppKind::Terminal);
     }
 
-    fn focus_or_open_app(&mut self, want: AppKind, steal: AppKind) {
-        if let Some((id, _)) = self.leaves().into_iter().find(|(_, app)| *app == want) {
-            self.focused = id;
-            return;
-        }
-        if let Some((id, _)) = self.leaves().into_iter().find(|(_, app)| *app == steal) {
-            self.set_app(id, want);
-            self.focused = id;
-            return;
-        }
-        let _ = self.split_focused(Direction::Vertical, 0.55, want);
+    #[test]
+    fn cannot_close_last_pane() {
+        let mut tree = PaneTree::new(AppKind::Files);
+        assert_eq!(tree.close_focused(), Err(ClosePaneError::LastPane));
+    }
+
+    #[test]
+    fn close_nested_default_layout() {
+        // Mirror Desktop::new seeding
+        let mut tree = PaneTree::new(AppKind::Terminal);
+        let root = tree.root();
+        let right = tree
+            .split(root, Direction::Vertical, 0.55, AppKind::Files)
+            .unwrap();
+        let _ = tree.split(root, Direction::Horizontal, 0.7, AppKind::Processes);
+        let _ = tree.split(right, Direction::Horizontal, 0.65, AppKind::Transfers);
+        assert_eq!(tree.leaves().len(), 4);
+
+        tree.close_focused().unwrap();
+        assert_eq!(tree.leaves().len(), 3);
+        tree.close_focused().unwrap();
+        assert_eq!(tree.leaves().len(), 2);
+        tree.close_focused().unwrap();
+        assert_eq!(tree.leaves().len(), 1);
+        assert_eq!(tree.close_focused(), Err(ClosePaneError::LastPane));
+    }
+
+    #[test]
+    fn focus_or_open_splits_to_the_right() {
+        let mut tree = PaneTree::new(AppKind::Terminal);
+        assert!(tree.focus_or_open(AppKind::Files));
+        assert_eq!(tree.leaves().len(), 2);
+        assert_eq!(tree.focused_app(), AppKind::Files);
+        assert!(!tree.focus_or_open(AppKind::Files));
+        assert_eq!(tree.leaves().len(), 2);
     }
 }

@@ -329,8 +329,8 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Line::from("Auth: ssh-agent · private key · password"),
         Line::from(""),
         Line::from("After connect: tiled desktop with SFTP files."),
-        Line::from("  F2 files · a mkdir · R rename · d delete · e edit"),
-        Line::from("  F4 procs · F7 editor · Esc returns here"),
+        Line::from("  F2–F7 open/focus pane · Ctrl+W or F10 close pane"),
+        Line::from("  Esc closes session · returns here"),
     ])
     .block(
         Block::default()
@@ -1517,6 +1517,10 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         .desktop
         .map(|d| d.focused_app())
         .unwrap_or(AppKind::Launcher);
+    let open_apps: Vec<AppKind> = model
+        .desktop
+        .map(|d| d.tree.leaves().into_iter().map(|(_, a)| a).collect())
+        .unwrap_or_default();
 
     let dock_hot = matches!(model.drop_target, Some(DropTarget::TransferDock));
     let mut spans = vec![Span::styled(
@@ -1534,22 +1538,30 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         },
     )];
     for app in AppKind::all_dock() {
-        let active = model.screen == ScreenKind::Desktop && focused == *app;
+        let is_open = open_apps.contains(app);
+        let active = model.screen == ScreenKind::Desktop && focused == *app && is_open;
         let style = if active {
             Style::default()
                 .fg(Th::ON_ACCENT)
                 .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
-        } else {
+        } else if is_open {
             Style::default()
                 .fg(Th::FG_MUTED)
                 .bg(Th::CHROME)
+        } else {
+            // Closed / available to open
+            Style::default()
+                .fg(Th::FG_DIM)
+                .bg(Th::CHROME)
+                .add_modifier(Modifier::DIM)
         };
-        spans.push(Span::styled(
-            format!(" {} ", app.label().to_ascii_uppercase()),
-            style,
-        ));
-        spans.push(Span::raw(""));
+        let label = if is_open {
+            format!(" {} ", app.label().to_ascii_uppercase())
+        } else {
+            format!(" [{}] ", app.label().to_ascii_uppercase())
+        };
+        spans.push(Span::styled(label, style));
     }
     if model.clipboard_has_files {
         spans.push(Span::styled(
@@ -1568,7 +1580,9 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let help = match model.screen {
         ScreenKind::Launcher => "a add · F9 log · Enter connect · q quit",
-        ScreenKind::Desktop => "F2 Files · F4 Procs · F9 log · Esc",
+        ScreenKind::Desktop => {
+            "F2–F7 open/focus · Ctrl+W / F10 close pane · Esc session"
+        }
     };
     let line = Line::from(vec![
         Span::styled(
