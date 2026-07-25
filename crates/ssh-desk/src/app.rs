@@ -52,6 +52,7 @@ struct SessionSlot {
     demo_term: String,
     pending_files_refresh: bool,
     fullscreen_app: Option<AppKind>,
+    cached_passphrase: Option<String>,
 }
 
 impl SessionSlot {
@@ -84,6 +85,7 @@ impl SessionSlot {
             demo_term,
             pending_files_refresh: false,
             fullscreen_app: None,
+            cached_passphrase: None,
         }
     }
 }
@@ -247,6 +249,7 @@ impl App {
         let slot_idx = if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
             // Reconnect: reset state.
             let slot = &mut self.sessions[pos];
+            slot.cached_passphrase = password_passphrase;
             slot.files = if online { FilesState::default() } else { FilesState::demo() };
             slot.viewer.clear();
             slot.editor.clear();
@@ -260,6 +263,7 @@ impl App {
             pos
         } else {
             let mut slot = SessionSlot::new(profile.id.clone(), profile.name.clone(), online);
+            slot.cached_passphrase = password_passphrase;
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
             if online {
                 slot.demo_term = format!(
@@ -542,7 +546,20 @@ impl App {
                     self.status = format!("connected · {host_id}");
                 }
                 SessionEvent::Disconnected { host_id, reason } => {
-                    self.status = format!("disconnected · {host_id}: {reason}");
+                    self.status = format!("disconnected · {host_id}: {reason} · attempting auto-reconnect...");
+                    // Trigger silent auto-reconnect attempt
+                    if let Some(pos) = self.sessions.iter().position(|s| s.host_id == host_id) {
+                        let slot = &self.sessions[pos];
+                        let pass = slot.cached_passphrase.clone();
+                        if let Some(profile) = self.hosts.iter().find(|h| h.id == host_id).cloned() {
+                            let hub = Arc::clone(&self.hub);
+                            let vault = self.vault.clone();
+                            tokio::spawn(async move {
+                                let p_pass = pass.as_deref();
+                                let _ = hub.connect(profile, &vault, p_pass).await;
+                            });
+                        }
+                    }
                 }
                 SessionEvent::PtyData(out) => {
                     if let Ok(txt) = std::str::from_utf8(&out.data) {
@@ -1397,6 +1414,8 @@ impl App {
         let mut moved = 0usize;
         let mut skipped = 0usize;
 
+        let mut errors = Vec::new();
+
         for entry in &entries {
             let name = match &entry.location {
                 FileLocation::Local { path } | FileLocation::Remote { path, .. } => path
@@ -1415,8 +1434,8 @@ impl App {
                     match self.hub.remote_rename(&host_id, path, &dest).await {
                         Ok(()) => moved += 1,
                         Err(e) => {
-                            self.status = format!("move failed · {e}");
-                            return Ok(());
+                            errors.push(format!("move {name} failed: {e}"));
+                            skipped += 1;
                         }
                     }
                 }
@@ -1429,12 +1448,15 @@ impl App {
                         .await
                     {
                         Ok(_) => queued += 1,
-                        Err(e) => self.status = format!("copy failed · {e}"),
+                        Err(e) => {
+                            errors.push(format!("copy {name} failed: {e}"));
+                            skipped += 1;
+                        }
                     }
                 }
                 (FileLocation::Remote { .. }, FileOp::Copy, true) => {
                     skipped += 1;
-                    self.status = "directory copy not supported yet (files only)".into();
+                    errors.push("directory copy not supported yet (files only)".into());
                 }
                 (FileLocation::Local { path }, FileOp::Copy | FileOp::Cut, false) => {
                     let cut = op == FileOp::Cut;
@@ -1444,30 +1466,41 @@ impl App {
                         .await
                     {
                         Ok(_) => queued += 1,
-                        Err(e) => self.status = format!("upload failed · {e}"),
+                        Err(e) => {
+                            errors.push(format!("upload {name} failed: {e}"));
+                            skipped += 1;
+                        }
                     }
                 }
                 (FileLocation::Local { .. }, _, true) => {
                     skipped += 1;
-                    self.status = "directory upload via clipboard not supported yet".into();
+                    errors.push("directory upload via clipboard not supported yet".into());
                 }
                 (FileLocation::Remote { host_id: src, .. }, _, _) if src != &host_id => {
                     skipped += 1;
-                    self.status = "cross-host paste not supported yet".into();
+                    errors.push("cross-host paste not supported yet".into());
                 }
                 _ => skipped += 1,
             }
         }
 
-        if op == FileOp::Cut {
+        if op == FileOp::Cut && errors.is_empty() {
             self.clipboard.clear_files();
         }
 
         if let Some(s) = self.slot_mut() { s.files.clear_marks(); s.pending_files_refresh = true; }
-        self.status = format!(
-            "paste · {moved} moved · {queued} queued · {skipped} skipped → {}",
-            dest_dir.display()
-        );
+        
+        if errors.is_empty() {
+            self.status = format!(
+                "paste · {moved} moved · {queued} queued · {skipped} skipped → {}",
+                dest_dir.display()
+            );
+        } else {
+            self.status = format!(
+                "paste incomplete · {} errors, {} done, {} queued, {} skipped",
+                errors.len(), moved, queued, skipped
+            );
+        }
         Ok(())
     }
 

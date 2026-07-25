@@ -166,6 +166,9 @@ impl SessionHub {
         let disconnect_host = host_id.clone();
 
         tokio::spawn(async move {
+            let mut keepalive_tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            let mut last_cols = cols as u32;
+            let mut last_rows = rows as u32;
             loop {
                 tokio::select! {
                     msg = channel.wait() => {
@@ -194,10 +197,16 @@ impl SessionHub {
                                 }
                             }
                             Some(PtyCommand::Resize { cols, rows }) => {
-                                let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
+                                last_cols = cols as u32;
+                                last_rows = rows as u32;
+                                let _ = channel.window_change(last_cols, last_rows, 0, 0).await;
                             }
                             None => break,
                         }
+                    }
+                    _ = keepalive_tick.tick() => {
+                        // Send no-op window change request to keep the PTY channel alive
+                        let _ = channel.window_change(last_cols, last_rows, 0, 0).await;
                     }
                 }
             }
