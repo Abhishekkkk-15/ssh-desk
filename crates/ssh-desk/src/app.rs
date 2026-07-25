@@ -2144,7 +2144,16 @@ fn strip_ansi_escapes(s: &str) -> String {
                 }
             }
         } else if c == '\x08' {
-            result.pop(); // Perform the backspace deletion locally on the text buffer
+            // PTY erases by sending: BS ('\x08'), Space (' '), BS ('\x08')
+            result.pop();
+            if chars.peek() == Some(&' ') {
+                let _ = chars.next(); // consume space
+                if chars.peek() == Some(&'\x08') {
+                    let _ = chars.next(); // consume second BS
+                }
+            }
+        } else if c == '\x7f' {
+            result.pop();
         } else {
             result.push(c);
         }
