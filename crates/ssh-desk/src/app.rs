@@ -51,6 +51,7 @@ struct SessionSlot {
     transfers: TransfersUi,
     demo_term: String,
     pending_files_refresh: bool,
+    fullscreen_app: Option<AppKind>,
 }
 
 impl SessionSlot {
@@ -82,6 +83,7 @@ impl SessionSlot {
             transfers: TransfersUi::default(),
             demo_term,
             pending_files_refresh: false,
+            fullscreen_app: None,
         }
     }
 }
@@ -892,10 +894,28 @@ impl App {
             self.show_session_switcher = !self.show_session_switcher;
             return Ok(());
         }
-        if key.code == KeyCode::F(11) || (ctrl && key.code == KeyCode::Char('f')) {
+        if key.code == KeyCode::F(11) {
+            let next_mode = if let Some(s) = self.slot_mut() {
+                if s.fullscreen_app.is_some() {
+                    s.fullscreen_app = None;
+                    Some("disabled")
+                } else {
+                    let focused = s.desktop.focused_app();
+                    s.fullscreen_app = Some(focused);
+                    Some("enabled")
+                }
+            } else {
+                None
+            };
+            if let Some(mode) = next_mode {
+                self.status = format!("pane full-screen {mode} · press F11 to toggle back");
+            }
+            return Ok(());
+        }
+        if ctrl && key.code == KeyCode::Char('f') {
             self.full_screen = !self.full_screen;
-            let mode = if self.full_screen { "enabled" } else { "disabled" };
-            self.status = format!("full-screen mode {mode} · press F11 or Ctrl+F to toggle");
+            let mode = if self.full_screen { "decorations hidden" } else { "decorations visible" };
+            self.status = format!("full-screen mode {mode} · press Ctrl+F to toggle");
             return Ok(());
         }
         if self.show_session_switcher {
@@ -1847,6 +1867,7 @@ impl App {
             active_session_idx: self.active_idx,
             show_session_switcher: self.show_session_switcher,
             full_screen: self.full_screen,
+            fullscreen_app: self.slot().and_then(|s| s.fullscreen_app),
             desktop,
             status: &self.status,
             term_buffer,

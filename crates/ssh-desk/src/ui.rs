@@ -31,6 +31,7 @@ pub struct UiFrame<'a> {
     pub active_session_idx: usize,
     pub show_session_switcher: bool,
     pub full_screen: bool,
+    pub fullscreen_app: Option<AppKind>,
     pub desktop: Option<&'a Desktop>,
     pub status: &'a str,
     pub term_buffer: &'a str,
@@ -281,7 +282,17 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 }
 
 fn draw_desktop(frame: &mut Frame<'_>, area: Rect, desktop: &Desktop, model: &UiFrame<'_>) {
-    draw_pane(frame, area, desktop.tree.root_node(), desktop, model);
+    if let Some(app) = model.fullscreen_app {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} [fullscreen] ", app.label()))
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        draw_app_body(frame, inner, app, true, model);
+    } else {
+        draw_pane(frame, area, desktop.tree.root_node(), desktop, model);
+    }
 }
 
 fn draw_pane(
