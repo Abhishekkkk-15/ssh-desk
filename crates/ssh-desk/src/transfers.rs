@@ -192,6 +192,16 @@ impl PathPrompt {
         }
     }
 
+    /// Select the focused entry for submit (file or directory). Skips `..`.
+    pub fn select_selected(&mut self) -> Option<PathBuf> {
+        let entry = self.browse_entries.get(self.browse_selected)?.clone();
+        if entry.name == ".." {
+            return None;
+        }
+        self.buffer = entry.path.display().to_string();
+        Some(entry.path)
+    }
+
     /// Destination for download into the current browse directory.
     pub fn download_into_cwd(&self) -> PathBuf {
         let name = self

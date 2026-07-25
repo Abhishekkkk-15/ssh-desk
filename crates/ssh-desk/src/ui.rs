@@ -1035,12 +1035,14 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
 
     frame.render_widget(
         Paragraph::new(match prompt.kind {
-            PathPromptKind::Upload => "Enter pick file · Tab/e edit path · Esc cancel".to_string(),
+            PathPromptKind::Upload => {
+                "Enter open dir · Space/Ctrl+Enter pick file/folder · Tab/e edit · Esc".to_string()
+            }
             PathPromptKind::Download => {
                 "Enter overwrite file · s save here · Tab/e edit · Esc".to_string()
             }
             PathPromptKind::CopyLocal => {
-                "Enter copy file to clipboard · Tab/e edit · Esc".to_string()
+                "Enter open dir · Space/Ctrl+Enter copy file/folder · Tab/e edit · Esc".to_string()
             }
         }),
         chunks[2],

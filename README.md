@@ -229,7 +229,7 @@ Closed apps appear dimmed as `[FILES]` on the dock; open ones without brackets; 
 ## File transfers & clipboard
 
 ### Upload / download
-- **Ctrl+U** / Transfers **`u`** — local path picker (upload into remote cwd). Recursive dirs supported if you submit a directory path (type path in edit mode; browse Enter on a folder currently navigates into it).
+- **Ctrl+U** / Transfers **`u`** — local path picker (upload into remote cwd). **Enter** opens a folder; **Space** or **Ctrl+Enter** selects a file or folder for upload (recursive).
 - **Ctrl+D** / Transfers **`d`** — download selected remote path.
 - Queue shows in **Transfers**; **`c`** cancel, **`r`** retry.
 

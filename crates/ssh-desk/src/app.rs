@@ -2573,6 +2573,32 @@ impl App {
             return Ok(());
         }
 
+        // Space / Ctrl+Enter: select file or folder for upload/copy (Enter still navigates dirs).
+        let select_entry = matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::NONE, KeyCode::Char(' '))
+                | (KeyModifiers::CONTROL, KeyCode::Enter)
+                | (KeyModifiers::CONTROL, KeyCode::Char('\n'))
+        );
+        if select_entry
+            && matches!(
+                prompt.kind,
+                PathPromptKind::Upload | PathPromptKind::CopyLocal
+            )
+        {
+            if let Some(path) = prompt.select_selected() {
+                let kind = prompt.kind;
+                let remote = prompt.remote.clone();
+                let remote_size = prompt.remote_size;
+                self.path_prompt = None;
+                self.submit_path_prompt(kind, path, remote, remote_size)
+                    .await?;
+            } else {
+                prompt.error = Some("select a file or folder (not ..)".into());
+            }
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => prompt.move_up(),
             KeyCode::Down | KeyCode::Char('j') => prompt.move_down(),
