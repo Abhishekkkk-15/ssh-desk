@@ -1,6 +1,6 @@
 //! Application state machine: launcher ↔ desktop session.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +16,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::DefaultTerminal;
-use ssh_core::{SessionEvent, SessionHub, join_remote};
+use ssh_core::{
+    SessionEvent, SessionHub, TransferDirection, TransferId, TransferStatus, join_remote,
+};
 use ssh_os::{
     Clipboard, DragPayload, DragSession, DropTarget, FileEntry, FileLocation, FileOp, OsDropOffer,
     PasteKind, classify_paste, existing_files,
@@ -134,6 +136,37 @@ pub struct App {
     diagnostics: DiagnosticsState,
     /// Multi-host restore in progress after startup.
     restore: Option<RestoreState>,
+    /// Cross-host paste: download id → upload follow-up.
+    pending_cross_host: HashMap<TransferId, CrossHostPending>,
+    /// Uploads to enqueue after a cross-host download finishes.
+    pending_cross_host_uploads: VecDeque<CrossHostUpload>,
+    /// Remote sources to delete after a successful cross-host cut upload.
+    pending_cross_host_cuts: VecDeque<(String, PathBuf)>,
+}
+
+/// Follow-up work for a cross-host clipboard paste (relay via local temp).
+#[derive(Debug, Clone)]
+enum CrossHostPending {
+    /// Download finished → enqueue upload into dest.
+    AwaitingDownload {
+        dest_host_id: String,
+        dest_dir: PathBuf,
+        local_temp: PathBuf,
+        cut_src: Option<(String, PathBuf)>,
+    },
+    /// Upload finished → optionally delete remote source and clean staging.
+    AwaitingUpload {
+        staging_dir: PathBuf,
+        cut_src: Option<(String, PathBuf)>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CrossHostUpload {
+    dest_host_id: String,
+    dest_dir: PathBuf,
+    local_temp: PathBuf,
+    cut_src: Option<(String, PathBuf)>,
 }
 
 /// Sequential reconnect of tabs saved on last quit.
@@ -210,6 +243,9 @@ impl App {
             files_prompt: None,
             diagnostics: DiagnosticsState::default(),
             restore: None,
+            pending_cross_host: HashMap::new(),
+            pending_cross_host_uploads: VecDeque::new(),
+            pending_cross_host_cuts: VecDeque::new(),
         }
     }
 
@@ -1011,10 +1047,15 @@ impl App {
                     }
                 }
                 SessionEvent::TransferUpdate(job) => {
-                    let done_upload = job.status == ssh_core::TransferStatus::Done
-                        && job.direction == ssh_core::TransferDirection::Upload;
+                    let done = job.status == TransferStatus::Done;
+                    let failed = matches!(
+                        job.status,
+                        TransferStatus::Failed | TransferStatus::Cancelled
+                    );
+                    let done_upload = done && job.direction == TransferDirection::Upload;
                     let name = job.display_name();
                     let status = job.status;
+                    let job_id = job.id;
                     let job_host = job.host_id.clone();
                     if let Some(slot) = self.sessions.iter_mut().find(|s| s.host_id == job_host) {
                         slot.transfers.upsert(job);
@@ -1023,6 +1064,54 @@ impl App {
                         }
                     }
                     self.status = format!("transfer · {} · {}", name, status.label());
+
+                    if done {
+                        if let Some(pending) = self.pending_cross_host.remove(&job_id) {
+                            match pending {
+                                CrossHostPending::AwaitingDownload {
+                                    dest_host_id,
+                                    dest_dir,
+                                    local_temp,
+                                    cut_src,
+                                } => {
+                                    self.pending_cross_host_uploads.push_back(CrossHostUpload {
+                                        dest_host_id,
+                                        dest_dir,
+                                        local_temp,
+                                        cut_src,
+                                    });
+                                }
+                                CrossHostPending::AwaitingUpload {
+                                    staging_dir,
+                                    cut_src,
+                                } => {
+                                    let _ = std::fs::remove_dir_all(&staging_dir);
+                                    if let Some(src) = cut_src {
+                                        self.pending_cross_host_cuts.push_back(src);
+                                    }
+                                }
+                            }
+                        }
+                    } else if failed {
+                        if let Some(pending) = self.pending_cross_host.remove(&job_id) {
+                            let temp = match pending {
+                                CrossHostPending::AwaitingDownload { local_temp, .. } => {
+                                    Some(local_temp)
+                                }
+                                CrossHostPending::AwaitingUpload { .. } => None,
+                            };
+                            if let Some(path) = temp {
+                                let _ = std::fs::remove_dir_all(
+                                    path.parent().unwrap_or(path.as_path()),
+                                );
+                                let _ = std::fs::remove_file(&path);
+                            }
+                            self.note(
+                                DiagLevel::Error,
+                                format!("cross-host paste failed · {name}"),
+                            );
+                        }
+                    }
                 }
                 SessionEvent::Status(msg) => {
                     self.diagnostics
@@ -2402,9 +2491,49 @@ impl App {
                         }
                     }
                 }
-                (FileLocation::Remote { host_id: src, .. }, _, _) if src != &host_id => {
-                    skipped += 1;
-                    errors.push("cross-host paste not supported yet".into());
+                (FileLocation::Remote { host_id: src, path }, _, _) if src != &host_id => {
+                    // Relay via local temp: download from src, then upload to active host.
+                    let cache = dirs::cache_dir()
+                        .or_else(dirs::data_local_dir)
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let staging = cache
+                        .join("ssh-desk")
+                        .join("cross-host")
+                        .join(uuid::Uuid::new_v4().to_string());
+                    if let Err(e) = std::fs::create_dir_all(&staging) {
+                        errors.push(format!("cross-host staging · {e}"));
+                        skipped += 1;
+                        continue;
+                    }
+                    let local_temp = staging.join(&name);
+                    let cut_src = if op == FileOp::Cut {
+                        Some((src.clone(), path.clone()))
+                    } else {
+                        None
+                    };
+                    match self
+                        .hub
+                        .enqueue_download_ex(src, path.clone(), local_temp.clone(), None, false)
+                        .await
+                    {
+                        Ok(id) => {
+                            self.pending_cross_host.insert(
+                                id,
+                                CrossHostPending::AwaitingDownload {
+                                    dest_host_id: host_id.clone(),
+                                    dest_dir: dest_dir.clone(),
+                                    local_temp,
+                                    cut_src,
+                                },
+                            );
+                            queued += 1;
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&staging);
+                            errors.push(format!("cross-host download {name} failed: {e}"));
+                            skipped += 1;
+                        }
+                    }
                 }
                 _ => skipped += 1,
             }
@@ -2440,6 +2569,71 @@ impl App {
         Ok(())
     }
 
+    /// Enqueue uploads / remote deletes scheduled by finished cross-host downloads.
+    async fn flush_cross_host_followups(&mut self) -> Result<()> {
+        while let Some(job) = self.pending_cross_host_uploads.pop_front() {
+            // cut=true removes the local staging file/dir after a successful upload.
+            match self
+                .hub
+                .enqueue_upload_ex(
+                    &job.dest_host_id,
+                    job.local_temp.clone(),
+                    job.dest_dir.clone(),
+                    true,
+                )
+                .await
+            {
+                Ok(id) => {
+                    let staging_dir = job
+                        .local_temp
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| job.local_temp.clone());
+                    self.pending_cross_host.insert(
+                        id,
+                        CrossHostPending::AwaitingUpload {
+                            staging_dir,
+                            cut_src: job.cut_src,
+                        },
+                    );
+                    self.status = format!(
+                        "cross-host · uploading → {} · {}",
+                        job.dest_host_id,
+                        job.local_temp
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    );
+                }
+                Err(e) => {
+                    let parent = job
+                        .local_temp
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| job.local_temp.clone());
+                    let _ = std::fs::remove_dir_all(&parent);
+                    self.note(DiagLevel::Error, format!("cross-host upload failed · {e}"));
+                }
+            }
+        }
+
+        while let Some((src_host, src_path)) = self.pending_cross_host_cuts.pop_front() {
+            match self.hub.remote_remove(&src_host, &src_path).await {
+                Ok(()) => {
+                    self.status = format!(
+                        "cross-host cut · removed {} on {src_host}",
+                        src_path.display()
+                    )
+                }
+                Err(e) => self.note(
+                    DiagLevel::Warn,
+                    format!("cross-host cut cleanup failed · {e}"),
+                ),
+            }
+        }
+        Ok(())
+    }
+
     async fn clipboard_paste_to_local(&mut self) -> Result<()> {
         let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
@@ -2460,16 +2654,17 @@ impl App {
         let mut queued = 0usize;
         for entry in entries {
             match entry.location {
-                FileLocation::Remote { host_id: src, path } if src == host_id => {
+                FileLocation::Remote { host_id: src, path } => {
                     let name = path
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "download.bin".into());
                     let local = dest_dir.join(name);
-                    let cut = op == FileOp::Cut;
+                    // Cut only when pasting from the active host; other hosts keep source.
+                    let cut = op == FileOp::Cut && src == host_id;
                     match self
                         .hub
-                        .enqueue_download_ex(&host_id, path, local, None, cut)
+                        .enqueue_download_ex(&src, path, local, None, cut)
                         .await
                     {
                         Ok(_) => queued += 1,
@@ -2478,9 +2673,6 @@ impl App {
                 }
                 FileLocation::Local { .. } => {
                     self.status = "clipboard already local · nothing to paste to disk".into();
-                }
-                _ => {
-                    self.status = "skip other hosts for paste-to-local".into();
                 }
             }
         }
@@ -3259,6 +3451,7 @@ pub async fn run() -> Result<()> {
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         app.drain_events();
+        app.flush_cross_host_followups().await?;
         app.tick_connect_spinner();
         if let Some(outcome) = app.poll_connect_outcome() {
             app.apply_connect_outcome(outcome).await?;

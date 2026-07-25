@@ -78,6 +78,7 @@ Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP 
 
 ### Clipboard & drag-and-drop
 - Remote **Ctrl+C / Ctrl+X / Ctrl+V** (copy / cut / paste)
+- **Cross-host paste**: copy on host A, switch session, paste on host B (relays via a local temp cache)
 - Local file onto clipboard: **Ctrl+L**; paste to local: **Ctrl+Shift+V**
 - In-TUI drag between folders (hold **Shift** to move)
 - OS file drop / `file://` paste → confirm upload (folder drops depend on the terminal)
