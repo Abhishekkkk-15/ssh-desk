@@ -2082,7 +2082,17 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
                 Event::Key(key) => app.handle_key(key).await?,
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
                 Event::Paste(data) => app.handle_paste(data).await?,
-                Event::Resize(_, _) => {}
+                 Event::Resize(w, h) => {
+                     let _ = terminal.clear(); // Clear the screen completely to refresh borders and prevent collision leaks
+                     // Resize all remote PTY channels to the new dimensions
+                     if let Some(host_id) = app.active_host_id().map(str::to_owned) {
+                         let (cols, rows) = app.last_geo.as_ref()
+                             .and_then(|geo| geo.panes.iter().find(|p| p.app == AppKind::Terminal))
+                             .map(|p| (p.area.width.saturating_sub(2), p.area.height.saturating_sub(2)))
+                             .unwrap_or((w.min(80), h.min(24)));
+                         let _ = app.hub.resize_pty(&host_id, cols, rows).await;
+                     }
+                 }
                 _ => {}
             }
         }
