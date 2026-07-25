@@ -50,6 +50,9 @@ pub struct UiFrame<'a> {
     pub path_prompt: Option<&'a PathPrompt>,
     pub host_form: Option<&'a HostForm>,
     pub vault_unlock: Option<&'a VaultUnlockPrompt>,
+    /// Background SSH connect in progress (name of host).
+    pub connecting_host: Option<&'a str>,
+    pub connect_spinner: u8,
     pub drag: Option<&'a DragSession>,
     pub drop_target: Option<&'a DropTarget>,
     pub os_drop: Option<&'a OsDropOffer>,
@@ -80,6 +83,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         }
         if let Some(unlock) = model.vault_unlock {
             draw_vault_unlock(frame, area, unlock);
+        } else if let Some(host) = model.connecting_host {
+            draw_connecting_overlay(frame, area, host, model.connect_spinner);
         }
         if let Some(offer) = model.os_drop {
             draw_os_drop_confirm(frame, area, offer);
@@ -131,6 +136,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     if let Some(unlock) = model.vault_unlock {
         draw_vault_unlock(frame, area, unlock);
+    } else if let Some(host) = model.connecting_host {
+        draw_connecting_overlay(frame, area, host, model.connect_spinner);
     }
     if let Some(offer) = model.os_drop {
         draw_os_drop_confirm(frame, area, offer);
@@ -810,7 +817,7 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
 
 fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockPrompt) {
     let width = area.width.min(52).max(36);
-    let height = 7u16;
+    let height = if prompt.connecting { 8u16 } else { 7u16 };
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect {
@@ -824,20 +831,29 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Unlock vault · {} ", prompt.host_name))
-        .border_style(Style::default().fg(Th::WARN));
+        .border_style(Style::default().fg(if prompt.connecting {
+            Th::ACCENT
+        } else {
+            Th::WARN
+        }));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
     if prompt.connecting {
+        let spin = spinner_glyph(prompt.spinner_frame);
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  connecting... please wait",
+                format!("  {spin}  connecting to {}…", prompt.host_name),
                 Style::default()
                     .fg(Th::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
+            Line::from(Span::styled(
+                "  unlocking vault · opening SSH · please wait",
+                Style::default().fg(Th::FG_MUTED),
+            )),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
         return;
@@ -865,6 +881,49 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
         Style::default().fg(Th::FG_DIM),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_connecting_overlay(frame: &mut Frame<'_>, area: Rect, host: &str, spinner_frame: u8) {
+    let width = area.width.min(48).max(32);
+    let height = 7u16.min(area.height).max(5);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Connecting ")
+        .border_style(Style::default().fg(Th::ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let spin = spinner_glyph(spinner_frame);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {spin}  connecting to {host}…"),
+            Style::default()
+                .fg(Th::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  negotiating SSH · please wait",
+            Style::default().fg(Th::FG_MUTED),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn spinner_glyph(frame: u8) -> &'static str {
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(frame as usize) % FRAMES.len()]
 }
 
 fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {

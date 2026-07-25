@@ -248,6 +248,7 @@ pub struct VaultUnlockPrompt {
     pub buffer: String,
     pub error: Option<String>,
     pub connecting: bool,
+    pub spinner_frame: u8,
 }
 
 impl VaultUnlockPrompt {
@@ -257,6 +258,7 @@ impl VaultUnlockPrompt {
             buffer: String::new(),
             error: None,
             connecting: false,
+            spinner_frame: 0,
         }
     }
 }

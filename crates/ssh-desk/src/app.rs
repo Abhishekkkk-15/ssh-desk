@@ -22,7 +22,7 @@ use ssh_os::{
 };
 use ssh_vault::{AuthMethod, HostProfile, Vault};
 use ssh_wm::{AppKind, Desktop, Direction};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::apps::{EditorState, ProcessesState};
 use crate::diagnostics::{DiagLevel, DiagnosticsState};
@@ -123,9 +123,20 @@ pub struct App {
     files_search: Option<String>,
     should_quit: bool,
     connect_in_flight: bool,
+    /// Host name shown while a background connect is running.
+    connecting_host: Option<String>,
+    connect_spinner: u8,
+    pending_connect: Option<oneshot::Receiver<ConnectOutcome>>,
     overwrite_prompt: Option<OverwritePrompt>,
     files_prompt: Option<FilesPrompt>,
     diagnostics: DiagnosticsState,
+}
+
+#[derive(Debug)]
+struct ConnectOutcome {
+    profile: HostProfile,
+    password_passphrase: Option<String>,
+    result: Result<(), String>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +186,9 @@ impl App {
             files_search: None,
             should_quit: false,
             connect_in_flight: false,
+            connecting_host: None,
+            connect_spinner: 0,
+            pending_connect: None,
             overwrite_prompt: None,
             files_prompt: None,
             diagnostics: DiagnosticsState::default(),
@@ -241,25 +255,101 @@ impl App {
         profile: HostProfile,
         password_passphrase: Option<String>,
     ) -> Result<()> {
+        self.begin_connect(profile, password_passphrase);
+        Ok(())
+    }
+
+    /// Start SSH connect in the background so the UI can animate a spinner.
+    fn begin_connect(&mut self, profile: HostProfile, password_passphrase: Option<String>) {
         if self.connect_in_flight {
-            return Ok(());
+            return;
         }
         self.connect_in_flight = true;
+        self.connect_spinner = 0;
+        self.connecting_host = Some(profile.name.clone());
         self.status = format!("connecting to {}…", profile.name);
+        if let Some(prompt) = self.vault_unlock.as_mut() {
+            prompt.connecting = true;
+            prompt.spinner_frame = 0;
+        }
 
         let hub = Arc::clone(&self.hub);
         let vault = self.vault.clone();
-        let p_pass = password_passphrase.as_deref();
-        match hub
-            .connect(profile.clone(), &vault, p_pass)
-            .await
-        {
-            Ok(_pty_id) => {
-                self.status = format!("connected · {}", profile.name);
+        let profile_c = profile.clone();
+        let pass = password_passphrase.clone();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = hub
+                .connect(profile_c.clone(), &vault, pass.as_deref())
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(ConnectOutcome {
+                profile: profile_c,
+                password_passphrase: pass,
+                result,
+            });
+        });
+        self.pending_connect = Some(rx);
+    }
+
+    fn tick_connect_spinner(&mut self) {
+        if !self.connect_in_flight {
+            return;
+        }
+        self.connect_spinner = self.connect_spinner.wrapping_add(1);
+        if let Some(prompt) = self.vault_unlock.as_mut() {
+            if prompt.connecting {
+                prompt.spinner_frame = self.connect_spinner;
             }
+        }
+        if let Some(name) = &self.connecting_host {
+            let spin = Self::connect_spinner_glyph(self.connect_spinner);
+            self.status = format!("{spin} connecting to {name}…");
+        }
+    }
+
+    fn poll_connect_outcome(&mut self) -> Option<ConnectOutcome> {
+        let rx = self.pending_connect.as_mut()?;
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.pending_connect = None;
+                Some(outcome)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_connect = None;
+                let name = self
+                    .connecting_host
+                    .clone()
+                    .unwrap_or_else(|| "host".into());
+                Some(ConnectOutcome {
+                    profile: HostProfile::new(name, "", ""),
+                    password_passphrase: None,
+                    result: Err("connection task ended unexpectedly".into()),
+                })
+            }
+        }
+    }
+
+    async fn apply_connect_outcome(&mut self, outcome: ConnectOutcome) -> Result<()> {
+        let ConnectOutcome {
+            profile,
+            password_passphrase,
+            result,
+        } = outcome;
+
+        match result {
             Err(e) => {
                 self.connect_in_flight = false;
-                self.vault_unlock = None;
+                self.connecting_host = None;
+                if let Some(prompt) = self.vault_unlock.as_mut() {
+                    prompt.connecting = false;
+                    prompt.error = Some(e.clone());
+                    prompt.buffer.clear();
+                } else {
+                    self.vault_unlock = None;
+                }
                 self.note_status(
                     DiagLevel::Error,
                     format!("connection failed · {e}"),
@@ -267,14 +357,17 @@ impl App {
                 );
                 return Ok(());
             }
+            Ok(()) => {
+                self.status = format!("connected · {}", profile.name);
+            }
         }
-        
-        self.vault_unlock = None; // clear unlock prompt now that connection completed
+
+        self.vault_unlock = None;
+        self.connecting_host = None;
         let online = true;
 
         // Find or create a slot for this host.
         let slot_idx = if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
-            // Reconnect: reset state.
             let slot = &mut self.sessions[pos];
             slot.cached_passphrase = password_passphrase;
             slot.files = FilesState::default();
@@ -315,6 +408,11 @@ impl App {
             );
         }
         Ok(())
+    }
+
+    fn connect_spinner_glyph(frame: u8) -> &'static str {
+        const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[(frame as usize) % FRAMES.len()]
     }
 
     /// Switch to the next session (Ctrl+Tab).
@@ -1188,16 +1286,37 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
+                if self
+                    .vault_unlock
+                    .as_ref()
+                    .is_some_and(|p| p.connecting)
+                {
+                    return Ok(());
+                }
                 self.vault_unlock = None;
                 self.status = "connect cancelled".into();
             }
             KeyCode::Backspace => {
+                if self
+                    .vault_unlock
+                    .as_ref()
+                    .is_some_and(|p| p.connecting)
+                {
+                    return Ok(());
+                }
                 if let Some(prompt) = self.vault_unlock.as_mut() {
                     prompt.buffer.pop();
                     prompt.error = None;
                 }
             }
             KeyCode::Enter => {
+                if self
+                    .vault_unlock
+                    .as_ref()
+                    .is_some_and(|p| p.connecting)
+                {
+                    return Ok(());
+                }
                 let passphrase = self
                     .vault_unlock
                     .as_ref()
@@ -1218,14 +1337,18 @@ impl App {
                 };
                 if let Some(prompt) = self.vault_unlock.as_mut() {
                     prompt.connecting = true;
+                    prompt.error = None;
                 }
-                self.status = format!("authenticating with vault key for {}...", profile.name);
-                
-                // We clear vault_unlock in connect_profile so the UI shows the spinner
-                // while connection is in flight.
-                self.connect_profile(profile, Some(passphrase)).await?;
+                self.begin_connect(profile, Some(passphrase));
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self
+                    .vault_unlock
+                    .as_ref()
+                    .is_some_and(|p| p.connecting)
+                {
+                    return Ok(());
+                }
                 if let Some(prompt) = self.vault_unlock.as_mut() {
                     prompt.buffer.push(c);
                     prompt.error = None;
@@ -2455,6 +2578,8 @@ impl App {
             path_prompt: self.path_prompt.as_ref(),
             host_form: self.host_form.as_ref(),
             vault_unlock: self.vault_unlock.as_ref(),
+            connecting_host: self.connecting_host.as_deref(),
+            connect_spinner: self.connect_spinner,
             drag: self.drag.as_ref(),
             drop_target: self.drop_target.as_ref(),
             os_drop: self.os_drop.as_ref(),
@@ -2550,6 +2675,10 @@ pub async fn run() -> Result<()> {
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         app.drain_events();
+        app.tick_connect_spinner();
+        if let Some(outcome) = app.poll_connect_outcome() {
+            app.apply_connect_outcome(outcome).await?;
+        }
         // Per-slot deferred refreshes.
         if app.slot().map(|s| s.pending_files_refresh).unwrap_or(false) {
             if let Some(s) = app.slot_mut() { s.pending_files_refresh = false; }
