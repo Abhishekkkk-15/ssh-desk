@@ -247,6 +247,7 @@ pub struct VaultUnlockPrompt {
     pub host_name: String,
     pub buffer: String,
     pub error: Option<String>,
+    pub connecting: bool,
 }
 
 impl VaultUnlockPrompt {
@@ -255,6 +256,7 @@ impl VaultUnlockPrompt {
             host_name: host_name.into(),
             buffer: String::new(),
             error: None,
+            connecting: false,
         }
     }
 }

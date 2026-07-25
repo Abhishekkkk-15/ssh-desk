@@ -200,7 +200,7 @@ impl App {
     async fn connect_profile(
         &mut self,
         profile: HostProfile,
-        password_passphrase: Option<&str>,
+        password_passphrase: Option<String>,
     ) -> Result<()> {
         if self.connect_in_flight {
             return Ok(());
@@ -211,8 +211,9 @@ impl App {
         let hub = Arc::clone(&self.hub);
         let vault = self.vault.clone();
         let online;
+        let p_pass = password_passphrase.as_deref();
         match hub
-            .connect(profile.clone(), &vault, password_passphrase)
+            .connect(profile.clone(), &vault, p_pass)
             .await
         {
             Ok(_pty_id) => {
@@ -224,6 +225,8 @@ impl App {
                 self.status = format!("offline desktop · {e}");
             }
         }
+        
+        self.vault_unlock = None; // clear unlock prompt now that connection completed
 
         // Find or create a slot for this host.
         let slot_idx = if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
@@ -860,8 +863,14 @@ impl App {
                         return Ok(());
                     }
                 };
-                self.vault_unlock = None;
-                self.connect_profile(profile, Some(&passphrase)).await?;
+                if let Some(prompt) = self.vault_unlock.as_mut() {
+                    prompt.connecting = true;
+                }
+                self.status = format!("authenticating with vault key for {}...", profile.name);
+                
+                // We clear vault_unlock in connect_profile so the UI shows the spinner
+                // while connection is in flight.
+                self.connect_profile(profile, Some(passphrase)).await?;
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(prompt) = self.vault_unlock.as_mut() {

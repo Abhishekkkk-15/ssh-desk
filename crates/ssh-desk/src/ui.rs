@@ -699,6 +699,21 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
+    if prompt.connecting {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  connecting... please wait",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
     let masked: String = std::iter::repeat_n('•', prompt.buffer.chars().count()).collect();
     let mut lines = vec![
         Line::from("Enter the vault passphrase used when saving this host."),
