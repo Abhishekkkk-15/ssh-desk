@@ -31,7 +31,9 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
-          - os: macos-13
+          # macos-13 was retired Dec 2025; jobs on that label queue forever.
+          # macos-15-intel is the last hosted x86_64 macOS runner (until ~Fall 2027).
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
           - os: macos-14
