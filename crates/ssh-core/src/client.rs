@@ -6,7 +6,7 @@ use std::sync::Arc;
 use russh::client::{self, Handle};
 use russh::keys::load_secret_key;
 use russh::keys::PrivateKeyWithHashAlg;
-use russh::ChannelMsg;
+use russh::{Channel, ChannelMsg};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use ssh_vault::{AuthMethod, HostProfile, Vault};
@@ -74,6 +74,16 @@ impl SessionHub {
         })
     }
 
+    /// Return the host_ids of all currently connected sessions.
+    pub async fn connected_host_ids(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|s| s.host_id.clone())
+            .collect()
+    }
+
     pub fn events_sender(&self) -> mpsc::UnboundedSender<SessionEvent> {
         self.events_tx.clone()
     }
@@ -92,9 +102,39 @@ impl SessionHub {
         )));
 
         let config = Arc::new(client::Config::default());
-        let mut handle = client::connect(config, addr.as_str(), ClientHandler)
-            .await
-            .map_err(|e| CoreError::Ssh(e.to_string()))?;
+
+        // Jump-host tunneling: if this profile has jump_via, open a direct-tcpip
+        // channel on the already-connected jump session and layer SSH over it.
+        let mut handle = if let Some(jump_id) = &profile.jump_via {
+            let sessions = self.sessions.lock().await;
+            let jump = sessions
+                .iter()
+                .find(|s| &s.host_id == jump_id || s.host_id.ends_with(jump_id.as_str()))
+                .ok_or_else(|| {
+                    CoreError::Ssh(format!(
+                        "jump host '{}' is not connected — connect it first",
+                        jump_id
+                    ))
+                })?;
+            let (host, port) = (
+                profile.host.clone(),
+                profile.port,
+            );
+            let channel: Channel<russh::client::Msg> = jump
+                .handle
+                .channel_open_direct_tcpip(&host, port as u32, "127.0.0.1", 0)
+                .await
+                .map_err(|e| CoreError::Ssh(format!("jump tcpip: {e}")))?;
+            drop(sessions);
+            let stream = channel.into_stream();
+            client::connect_stream(config, stream, ClientHandler)
+                .await
+                .map_err(|e| CoreError::Ssh(format!("jump SSH: {e}")))?  
+        } else {
+            client::connect(config, addr.as_str(), ClientHandler)
+                .await
+                .map_err(|e| CoreError::Ssh(e.to_string()))?
+        };
 
         authenticate(&mut handle, &profile, vault, password_passphrase).await?;
 

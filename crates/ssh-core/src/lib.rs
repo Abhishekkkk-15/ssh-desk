@@ -1,4 +1,4 @@
-//! SSH session hub: connect, PTY channels, and SFTP.
+//! SSH session hub: connect, PTY channels, SFTP, and multi-session/jump support.
 
 mod client;
 mod error;

@@ -39,28 +39,69 @@ enum Screen {
     Desktop,
 }
 
-pub struct App {
-    screen: Screen,
-    vault: Vault,
-    hosts: Vec<HostProfile>,
-    selected_host: usize,
-    desktop: Option<Desktop>,
-    active_host_id: Option<String>,
-    status: String,
-    hub: Arc<SessionHub>,
-    events_rx: mpsc::UnboundedReceiver<SessionEvent>,
-    clipboard: Clipboard,
-    /// Shell scrollback / demo buffer.
-    demo_term: String,
+/// Per-session desktop state.
+struct SessionSlot {
+    host_id: String,
+    host_name: String,
+    desktop: Desktop,
     files: FilesState,
     viewer: ViewerState,
     editor: EditorState,
     processes: ProcessesState,
     transfers: TransfersUi,
+    demo_term: String,
+    pending_files_refresh: bool,
+}
+
+impl SessionSlot {
+    fn new(host_id: String, host_name: String, online: bool) -> Self {
+        let demo_term = if online {
+            String::new()
+        } else {
+            format!(
+                "Desktop for '{host_name}' running in offline/demo mode.\n\
+                 Fix auth and reconnect (Esc → launcher → Enter).\n"
+            )
+        };
+        SessionSlot {
+            host_id,
+            host_name,
+            desktop: Desktop::new(String::new(), String::new()), // filled below
+            files: if online {
+                FilesState::default()
+            } else {
+                FilesState::demo()
+            },
+            viewer: ViewerState::default(),
+            editor: EditorState::default(),
+            processes: if online {
+                ProcessesState::default()
+            } else {
+                ProcessesState::demo()
+            },
+            transfers: TransfersUi::default(),
+            demo_term,
+            pending_files_refresh: false,
+        }
+    }
+}
+
+pub struct App {
+    screen: Screen,
+    vault: Vault,
+    hosts: Vec<HostProfile>,
+    selected_host: usize,
+    /// All open sessions (tabs).
+    sessions: Vec<SessionSlot>,
+    /// Index into `sessions` of the currently-viewed session.
+    active_idx: usize,
+    status: String,
+    hub: Arc<SessionHub>,
+    events_rx: mpsc::UnboundedReceiver<SessionEvent>,
+    clipboard: Clipboard,
     path_prompt: Option<PathPrompt>,
     host_form: Option<HostForm>,
     vault_unlock: Option<VaultUnlockPrompt>,
-    pending_files_refresh: bool,
     /// Last computed layout for mouse hit-testing.
     last_geo: Option<FrameGeo>,
     /// Mouse press awaiting drag threshold.
@@ -70,6 +111,9 @@ pub struct App {
     pending_drop: Option<PendingDrop>,
     pending_open_parent: bool,
     os_drop: Option<OsDropOffer>,
+    /// Show the session-switcher overlay.
+    show_session_switcher: bool,
+    full_screen: bool,
     should_quit: bool,
     connect_in_flight: bool,
 }
@@ -89,29 +133,15 @@ impl App {
             vault,
             hosts,
             selected_host: 0,
-            desktop: None,
-            active_host_id: None,
+            sessions: Vec::new(),
+            active_idx: 0,
             status: "ssh-desk · select a host and press Enter to connect".into(),
             hub,
             events_rx,
             clipboard: Clipboard::new(),
-            demo_term: String::from(
-                "┌ ssh-desk terminal ─────────────────────\n\
-                 │ Not connected yet.\n\
-                 │ From the launcher, pick a host and press Enter.\n\
-                 │ Keys: Tab · F2 Files · F3 Term · F4 Procs · F5 Xfer · F7 Edit\n\
-                 │       Ctrl+U/D transfer · Ctrl+S save · q quit\n\
-                 └──────────────────────────────────────────\n",
-            ),
-            files: FilesState::default(),
-            viewer: ViewerState::default(),
-            editor: EditorState::default(),
-            processes: ProcessesState::default(),
-            transfers: TransfersUi::default(),
             path_prompt: None,
             host_form: None,
             vault_unlock: None,
-            pending_files_refresh: false,
             last_geo: None,
             mouse_press: None,
             drag: None,
@@ -119,9 +149,33 @@ impl App {
             pending_drop: None,
             pending_open_parent: false,
             os_drop: None,
+            show_session_switcher: false,
+            full_screen: false,
             should_quit: false,
             connect_in_flight: false,
         }
+    }
+
+    // ── per-session accessors ──────────────────────────────────────────────────
+
+    fn slot(&self) -> Option<&SessionSlot> {
+        self.sessions.get(self.active_idx)
+    }
+
+    fn slot_mut(&mut self) -> Option<&mut SessionSlot> {
+        self.sessions.get_mut(self.active_idx)
+    }
+
+    fn active_host_id(&self) -> Option<&str> {
+        self.slot().map(|s| s.host_id.as_str())
+    }
+
+    fn desktop(&self) -> Option<&Desktop> {
+        self.slot().map(|s| &s.desktop)
+    }
+
+    fn desktop_mut(&mut self) -> Option<&mut Desktop> {
+        self.slot_mut().map(|s| &mut s.desktop)
     }
 
     fn selected_profile(&self) -> Option<&HostProfile> {
@@ -154,50 +208,119 @@ impl App {
 
         let hub = Arc::clone(&self.hub);
         let vault = self.vault.clone();
+        let online;
         match hub
             .connect(profile.clone(), &vault, password_passphrase)
             .await
         {
             Ok(_pty_id) => {
-                self.active_host_id = Some(profile.id.clone());
-                self.desktop = Some(Desktop::new(profile.id.clone(), profile.name.clone()));
-                self.screen = Screen::Desktop;
-                self.demo_term.clear();
-                self.viewer.clear();
-                self.editor.clear();
+                online = true;
                 self.status = format!("connected · {}", profile.name);
-                if let Err(e) = self.refresh_files_home().await {
-                    self.files = FilesState::demo();
-                    self.status = format!("connected · files: {e}");
-                }
-                let _ = self.refresh_processes().await;
             }
             Err(e) => {
-                self.active_host_id = Some(profile.id.clone());
-                self.desktop = Some(Desktop::new(profile.id.clone(), profile.name.clone()));
-                self.screen = Screen::Desktop;
-                self.demo_term = format!(
-                    "Connection failed: {e}\n\n\
-                     Desktop shell is open in offline/demo mode.\n\
-                     Fix auth (ssh-agent / key) and reconnect from launcher (Esc).\n"
-                );
-                self.files = FilesState::demo();
-                self.viewer.clear();
-                self.editor.clear();
-                self.processes = ProcessesState::demo();
+                online = false;
                 self.status = format!("offline desktop · {e}");
             }
         }
+
+        // Find or create a slot for this host.
+        let slot_idx = if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
+            // Reconnect: reset state.
+            let slot = &mut self.sessions[pos];
+            slot.files = if online { FilesState::default() } else { FilesState::demo() };
+            slot.viewer.clear();
+            slot.editor.clear();
+            slot.processes = if online { ProcessesState::default() } else { ProcessesState::demo() };
+            slot.demo_term = if online {
+                String::new()
+            } else {
+                format!("Reconnect failed. Offline/demo mode.\n")
+            };
+            slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
+            pos
+        } else {
+            let mut slot = SessionSlot::new(profile.id.clone(), profile.name.clone(), online);
+            slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
+            if !online {
+                slot.demo_term = format!(
+                    "Connection failed.\n\
+                     Desktop for '{}' running in offline/demo mode.\n\
+                     Fix auth and reconnect from launcher (Esc).\n",
+                    profile.name
+                );
+            }
+            self.sessions.push(slot);
+            self.sessions.len() - 1
+        };
+        self.active_idx = slot_idx;
+        self.screen = Screen::Desktop;
         self.connect_in_flight = false;
+
+        if online {
+            if let Err(e) = self.refresh_files_home().await {
+                if let Some(s) = self.sessions.get_mut(slot_idx) {
+                    s.files = FilesState::demo();
+                }
+                self.status = format!("connected · files: {e}");
+            }
+            let _ = self.refresh_processes().await;
+        }
+        let session_count = self.sessions.len();
+        if session_count > 1 {
+            self.status = format!(
+                "{} sessions · Ctrl+Tab switch · F8 picker · {}",
+                session_count,
+                self.status
+            );
+        }
+        Ok(())
+    }
+
+    /// Switch to the next session (Ctrl+Tab).
+    fn session_next(&mut self) {
+        if self.sessions.is_empty() { return; }
+        self.active_idx = (self.active_idx + 1) % self.sessions.len();
+        let name = self.sessions[self.active_idx].host_name.clone();
+        self.status = format!("session [{}/{}] · {}", self.active_idx + 1, self.sessions.len(), name);
+    }
+
+    /// Switch to the previous session (Ctrl+Shift+Tab).
+    fn session_prev(&mut self) {
+        if self.sessions.is_empty() { return; }
+        let n = self.sessions.len();
+        self.active_idx = (self.active_idx + n - 1) % n;
+        let name = self.sessions[self.active_idx].host_name.clone();
+        self.status = format!("session [{}/{}] · {}", self.active_idx + 1, self.sessions.len(), name);
+    }
+
+    /// Disconnect and close the current session tab.
+    async fn close_current_session(&mut self) -> Result<()> {
+        if self.sessions.is_empty() {
+            self.screen = Screen::Launcher;
+            return Ok(());
+        }
+        let host_id = self.sessions[self.active_idx].host_id.clone();
+        let _ = self.hub.disconnect(&host_id).await;
+        self.sessions.remove(self.active_idx);
+        if self.sessions.is_empty() {
+            self.active_idx = 0;
+            self.screen = Screen::Launcher;
+            self.status = "all sessions closed · back to launcher".into();
+        } else {
+            self.active_idx = self.active_idx.min(self.sessions.len() - 1);
+            let name = self.sessions[self.active_idx].host_name.clone();
+            self.status = format!("closed · now on {name}");
+        }
         Ok(())
     }
 
     async fn refresh_files_home(&mut self) -> Result<(), ssh_core::CoreError> {
-        let Some(host_id) = self.active_host_id.clone() else {
-            return Ok(());
+        let host_id = match self.active_host_id() {
+            Some(id) => id.to_owned(),
+            None => return Ok(()),
         };
         if !self.hub.has_sftp(&host_id).await {
-            self.files = FilesState::demo();
+            if let Some(s) = self.slot_mut() { s.files = FilesState::demo(); }
             return Ok(());
         }
         let home = self.hub.canonicalize(&host_id, ".").await?;
@@ -205,20 +328,28 @@ impl App {
     }
 
     async fn load_dir(&mut self, path: PathBuf) -> Result<(), ssh_core::CoreError> {
-        let Some(host_id) = self.active_host_id.clone() else {
-            return Ok(());
+        let host_id = match self.active_host_id() {
+            Some(id) => id.to_owned(),
+            None => return Ok(()),
         };
-        self.files.loading = true;
-        self.files.error = None;
+        if let Some(s) = self.slot_mut() {
+            s.files.loading = true;
+            s.files.error = None;
+        }
         match self.hub.list_dir(&host_id, &path).await {
             Ok(entries) => {
-                self.files.set_listing(path.clone(), entries);
-                self.status = format!("files · {}", self.files.cwd_display());
+                if let Some(s) = self.slot_mut() {
+                    s.files.set_listing(path.clone(), entries);
+                }
+                let cwd_display = self.slot().map(|s| s.files.cwd_display()).unwrap_or_default();
+                self.status = format!("files · {}", cwd_display);
                 Ok(())
             }
             Err(e) => {
-                self.files.loading = false;
-                self.files.error = Some(e.to_string());
+                if let Some(s) = self.slot_mut() {
+                    s.files.loading = false;
+                    s.files.error = Some(e.to_string());
+                }
                 self.status = format!("files error · {e}");
                 Err(e)
             }
@@ -226,25 +357,29 @@ impl App {
     }
 
     async fn open_selected_file(&mut self) -> Result<()> {
-        let Some(row) = self.files.selected_row() else {
-            return Ok(());
+        let (cwd, row, entries, online) = match self.slot() {
+            Some(s) => (s.files.cwd.clone(), s.files.selected_row(), s.files.entries.clone(), s.files.online),
+            None => return Ok(()),
         };
-        let Some((path, is_dir)) = resolve_open_path(&self.files.cwd, row, &self.files.entries) else {
+        let Some(row) = row else { return Ok(()); };
+        let Some((path, is_dir)) = resolve_open_path(&cwd, row, &entries) else {
             return Ok(());
         };
 
         if is_dir {
-            if self.files.online {
+            if online {
                 if let Err(e) = self.load_dir(path).await {
                     self.status = format!("cd failed · {e}");
                 }
             } else if path.ends_with("Documents") {
-                self.files.cwd = path;
-                self.files.entries = vec![];
-                self.files.selected = 0;
+                if let Some(s) = self.slot_mut() {
+                    s.files.cwd = path;
+                    s.files.entries = vec![];
+                    s.files.selected = 0;
+                }
                 self.status = "files · /home/demo/Documents (demo empty)".into();
             } else {
-                self.files = FilesState::demo();
+                if let Some(s) = self.slot_mut() { s.files = FilesState::demo(); }
                 self.status = "files · demo root".into();
             }
             return Ok(());
@@ -256,20 +391,23 @@ impl App {
     async fn open_path(&mut self, path: PathBuf, force_editor: bool) -> Result<()> {
         let action = sniff_open_action(&path);
         let into_editor = force_editor || matches!(action, OpenAction::EditText);
+        let online = self.slot().map(|s| s.files.online).unwrap_or(false);
 
-        if self.files.online {
-            let Some(host_id) = self.active_host_id.clone() else {
-                return Ok(());
+        if online {
+            let host_id = match self.active_host_id() {
+                Some(id) => id.to_owned(),
+                None => return Ok(()),
             };
             match self.hub.read_file(&host_id, &path).await {
                 Ok(content) => {
                     if into_editor && !content.looks_binary() {
                         if let Some(text) = content.as_text() {
-                            self.editor = EditorState::from_text(path, text, true);
-                            if let Some(desktop) = self.desktop.as_mut() {
-                                desktop.tree.focus_or_open_editor();
-                            }
-                            self.status = format!("editor · {}", self.editor.title);
+                            let title = if let Some(s) = self.slot_mut() {
+                                s.editor = EditorState::from_text(path, text, true);
+                                s.desktop.tree.focus_or_open_editor();
+                                s.editor.title.clone()
+                            } else { String::new() };
+                            self.status = format!("editor · {}", title);
                             return Ok(());
                         }
                     }
@@ -279,58 +417,68 @@ impl App {
                         .and_then(|g| g.files_pane_inner)
                         .map(|r| (r.width.saturating_sub(2).max(20), r.height.saturating_sub(2).max(8)))
                         .unwrap_or((60, 20));
-                    self.viewer = ViewerState::from_content(content, cols, rows);
-                    if let Some(desktop) = self.desktop.as_mut() {
-                        desktop.tree.focus_or_open_viewer();
-                    }
-                    self.status = format!("viewer · {}", self.viewer.title);
+                    let title = if let Some(s) = self.slot_mut() {
+                        s.viewer = ViewerState::from_content(content, cols, rows);
+                        s.desktop.tree.focus_or_open_viewer();
+                        s.viewer.title.clone()
+                    } else { String::new() };
+                    self.status = format!("viewer · {}", title);
                 }
                 Err(e) => self.status = format!("open failed · {e}"),
             }
         } else if into_editor {
-            self.editor = EditorState::from_text(
-                path.clone(),
-                &ViewerState::demo_file(&path).body,
-                false,
-            );
-            if let Some(desktop) = self.desktop.as_mut() {
-                desktop.tree.focus_or_open_editor();
-            }
-            self.status = format!("editor · {} (demo)", self.editor.title);
+            let title = if let Some(s) = self.slot_mut() {
+                s.editor = EditorState::from_text(
+                    path.clone(),
+                    &ViewerState::demo_file(&path).body,
+                    false,
+                );
+                s.desktop.tree.focus_or_open_editor();
+                s.editor.title.clone()
+            } else { String::new() };
+            self.status = format!("editor · {} (demo)", title);
         } else {
-            self.viewer = ViewerState::demo_file(&path);
-            if let Some(desktop) = self.desktop.as_mut() {
-                desktop.tree.focus_or_open_viewer();
-            }
-            self.status = format!("viewer · {} (demo)", self.viewer.title);
+            let title = if let Some(s) = self.slot_mut() {
+                s.viewer = ViewerState::demo_file(&path);
+                s.desktop.tree.focus_or_open_viewer();
+                s.viewer.title.clone()
+            } else { String::new() };
+            self.status = format!("viewer · {} (demo)", title);
         }
         Ok(())
     }
 
     async fn refresh_processes(&mut self) -> Result<()> {
-        let Some(host_id) = self.active_host_id.clone() else {
-            self.processes = ProcessesState::demo();
-            return Ok(());
+        let host_id = match self.active_host_id() {
+            Some(id) => id.to_owned(),
+            None => {
+                if let Some(s) = self.slot_mut() { s.processes = ProcessesState::demo(); }
+                return Ok(());
+            }
         };
         if !self.hub.is_connected(&host_id).await {
-            self.processes = ProcessesState::demo();
+            if let Some(s) = self.slot_mut() { s.processes = ProcessesState::demo(); }
             return Ok(());
         }
-        self.processes.loading = true;
-        // Portable-ish listing; fall back if busybox/ps lacks flags.
+        if let Some(s) = self.slot_mut() { s.processes.loading = true; }
         let cmd = "ps -eo pid,user,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -n 50 || ps aux 2>/dev/null | head -n 50";
         match self.hub.exec_capture(&host_id, cmd).await {
             Ok(out) => {
-                self.processes = ProcessesState::from_ps(&out);
-                if self.processes.rows.is_empty() {
-                    self.processes.error = Some("no process rows parsed".into());
-                }
-                self.status = format!("processes · {} rows", self.processes.rows.len());
+                let row_count = if let Some(s) = self.slot_mut() {
+                    s.processes = ProcessesState::from_ps(&out);
+                    if s.processes.rows.is_empty() {
+                        s.processes.error = Some("no process rows parsed".into());
+                    }
+                    s.processes.rows.len()
+                } else { 0 };
+                self.status = format!("processes · {} rows", row_count);
             }
             Err(e) => {
-                self.processes.loading = false;
-                self.processes.error = Some(e.to_string());
-                self.processes.online = false;
+                if let Some(s) = self.slot_mut() {
+                    s.processes.loading = false;
+                    s.processes.error = Some(e.to_string());
+                    s.processes.online = false;
+                }
                 self.status = format!("processes · {e}");
             }
         }
@@ -338,20 +486,23 @@ impl App {
     }
 
     async fn save_editor(&mut self) -> Result<()> {
-        let Some(path) = self.editor.path.clone() else {
-            return Ok(());
+        let (path, online) = match self.slot() {
+            Some(s) => (s.editor.path.clone(), s.editor.online),
+            None => return Ok(()),
         };
-        if !self.editor.online {
+        let Some(path) = path else { return Ok(()); };
+        if !online {
             self.status = "editor · offline demo (cannot save)".into();
             return Ok(());
         }
-        let Some(host_id) = self.active_host_id.clone() else {
-            return Ok(());
+        let host_id = match self.active_host_id() {
+            Some(id) => id.to_owned(),
+            None => return Ok(()),
         };
-        let data = self.editor.contents();
+        let data = self.slot().map(|s| s.editor.contents()).unwrap_or_default();
         match self.hub.write_file(&host_id, &path, data.as_bytes()).await {
             Ok(()) => {
-                self.editor.dirty = false;
+                if let Some(s) = self.slot_mut() { s.editor.dirty = false; }
                 self.status = format!("saved · {}", path.display());
             }
             Err(e) => self.status = format!("save failed · {e}"),
@@ -369,11 +520,15 @@ impl App {
                     self.status = format!("disconnected · {host_id}: {reason}");
                 }
                 SessionEvent::PtyData(out) => {
-                    if let Ok(s) = std::str::from_utf8(&out.data) {
-                        self.demo_term.push_str(s);
-                        if self.demo_term.len() > 200_000 {
-                            let keep = self.demo_term.len() - 200_000;
-                            self.demo_term.drain(..keep);
+                    if let Ok(txt) = std::str::from_utf8(&out.data) {
+                        // Push PTY data to the slot whose pty session matches.
+                        // We route by active slot for now (single PTY per session).
+                        if let Some(slot) = self.slot_mut() {
+                            slot.demo_term.push_str(txt);
+                            if slot.demo_term.len() > 200_000 {
+                                let keep = slot.demo_term.len() - 200_000;
+                                slot.demo_term.drain(..keep);
+                            }
                         }
                     }
                 }
@@ -382,11 +537,14 @@ impl App {
                         && job.direction == ssh_core::TransferDirection::Upload;
                     let name = job.display_name();
                     let status = job.status;
-                    self.transfers.upsert(job);
-                    self.status = format!("transfer · {} · {}", name, status.label());
-                    if done_upload && self.files.online {
-                        self.pending_files_refresh = true;
+                    let job_host = job.host_id.clone();
+                    if let Some(slot) = self.sessions.iter_mut().find(|s| s.host_id == job_host) {
+                        slot.transfers.upsert(job);
+                        if done_upload && slot.files.online {
+                            slot.pending_files_refresh = true;
+                        }
                     }
+                    self.status = format!("transfer · {} · {}", name, status.label());
                 }
                 SessionEvent::Status(msg) => self.status = msg,
                 SessionEvent::Error(msg) => self.status = format!("error: {msg}"),
@@ -435,18 +593,17 @@ impl App {
                 // Forward plain text to the PTY when the terminal pane is focused.
                 if self.screen == Screen::Desktop {
                     let focused = self
-                        .desktop
-                        .as_ref()
+                        .desktop()
                         .map(|d| d.focused_app())
                         .unwrap_or(AppKind::Terminal);
                     if focused == AppKind::Terminal {
-                        if let Some(host_id) = &self.active_host_id {
-                            if self.hub.is_connected(host_id).await {
-                                let _ = self.hub.write_pty(host_id, text.as_bytes()).await;
+                        if let Some(host_id) = self.active_host_id().map(str::to_owned) {
+                            if self.hub.is_connected(&host_id).await {
+                                let _ = self.hub.write_pty(&host_id, text.as_bytes()).await;
                                 return Ok(());
                             }
                         }
-                        self.demo_term.push_str(&text);
+                        if let Some(s) = self.slot_mut() { s.demo_term.push_str(&text); }
                         return Ok(());
                     }
                 }
@@ -457,7 +614,7 @@ impl App {
     }
 
     fn offer_os_upload(&mut self, paths: Vec<PathBuf>) {
-        if !self.files.online {
+        if !self.slot().map(|s| s.files.online).unwrap_or(false) {
             self.status = "OS drop · connect a session to upload".into();
             // Still park paths on the file clipboard for later paste.
             let entries: Vec<FileEntry> = paths
@@ -470,7 +627,7 @@ impl App {
                 format!("OS drop · {n} file(s) on clipboard · connect then Ctrl+V to upload");
             return;
         }
-        let dest = self.files.cwd.clone();
+        let dest = self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default();
         let n = paths.len();
         self.os_drop = Some(OsDropOffer::new(paths, dest));
         self.status = format!("OS drop · confirm upload of {n} file(s) · Enter/y · Esc");
@@ -507,7 +664,7 @@ impl App {
     }
 
     async fn queue_os_uploads(&mut self, paths: Vec<PathBuf>, dest: PathBuf) -> Result<()> {
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return Ok(());
         };
@@ -524,9 +681,9 @@ impl App {
                 }
             }
         }
-        self.pending_files_refresh = true;
+        if let Some(s) = self.slot_mut() { s.pending_files_refresh = true; }
         self.status = format!("queued {queued} upload(s) → {}", dest.display());
-        if let Some(desktop) = self.desktop.as_mut() {
+        if let Some(desktop) = self.desktop_mut() {
             if let Some((tid, _)) = desktop
                 .tree
                 .leaves()
@@ -716,9 +873,51 @@ impl App {
     }
 
     async fn handle_desktop_key(&mut self, key: KeyEvent) -> Result<()> {
+        // ── Session management keys ─────────────────────────────────────
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if ctrl && key.code == KeyCode::Tab && !shift {
+            self.session_next();
+            return Ok(());
+        }
+        if ctrl && key.code == KeyCode::BackTab {
+            self.session_prev();
+            return Ok(());
+        }
+        if ctrl && key.code == KeyCode::Char('w') {
+            self.close_current_session().await?;
+            return Ok(());
+        }
+        if key.code == KeyCode::F(8) {
+            self.show_session_switcher = !self.show_session_switcher;
+            return Ok(());
+        }
+        if key.code == KeyCode::F(11) || (ctrl && key.code == KeyCode::Char('f')) {
+            self.full_screen = !self.full_screen;
+            let mode = if self.full_screen { "enabled" } else { "disabled" };
+            self.status = format!("full-screen mode {mode} · press F11 or Ctrl+F to toggle");
+            return Ok(());
+        }
+        if self.show_session_switcher {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.session_prev(),
+                KeyCode::Down | KeyCode::Char('j') => self.session_next(),
+                KeyCode::Char(n) if n.is_ascii_digit() => {
+                    let idx = n.to_digit(10).unwrap_or(0) as usize;
+                    let idx = if idx == 0 { 9 } else { idx - 1 };
+                    if idx < self.sessions.len() {
+                        self.active_idx = idx;
+                        let name = self.sessions[idx].host_name.clone();
+                        self.status = format!("session {}/{} · {}", idx + 1, self.sessions.len(), name);
+                    }
+                }
+                KeyCode::Enter | KeyCode::Esc | KeyCode::F(8) => self.show_session_switcher = false,
+                _ => {}
+            }
+            return Ok(());
+        }
         let focused = self
-            .desktop
-            .as_ref()
+            .desktop()
             .map(|d| d.focused_app())
             .unwrap_or(AppKind::Terminal);
 
@@ -736,56 +935,43 @@ impl App {
                 self.status = "drag cancelled".into();
                 return Ok(());
             }
-            if focused == AppKind::Files && !self.files.marked.is_empty() {
-                self.files.clear_marks();
+            if focused == AppKind::Files && self.slot().map(|s| !s.files.marked.is_empty()).unwrap_or(false) {
+                if let Some(s) = self.slot_mut() { s.files.clear_marks(); }
                 self.status = "selection cleared".into();
                 return Ok(());
             }
-            if focused == AppKind::Editor && self.editor.is_open() {
-                if self.editor.dirty && !self.editor.discard_armed {
-                    self.editor.discard_armed = true;
+            if focused == AppKind::Editor && self.slot().map(|s| s.editor.is_open()).unwrap_or(false) {
+                if self.slot().map(|s| s.editor.dirty && !s.editor.discard_armed).unwrap_or(false) {
+                    if let Some(s) = self.slot_mut() { s.editor.discard_armed = true; }
                     self.status =
                         "unsaved changes · Ctrl+S save · Esc again discards".into();
                     return Ok(());
                 }
-                self.editor.clear();
-                if let Some(desktop) = self.desktop.as_mut() {
-                    if let Some((id, _)) = desktop
-                        .tree
-                        .leaves()
-                        .into_iter()
-                        .find(|(_, app)| *app == AppKind::Files)
-                    {
-                        desktop.tree.set_focus(id);
+                if let Some(s) = self.slot_mut() {
+                    s.editor.clear();
+                    if let Some((id, _)) = s.desktop.tree.leaves().into_iter().find(|(_, app)| *app == AppKind::Files) {
+                        s.desktop.tree.set_focus(id);
                     }
                 }
                 self.status = "editor closed".into();
                 return Ok(());
             }
-            if focused == AppKind::Viewer && self.viewer.is_open() {
-                self.viewer.clear();
-                if let Some(desktop) = self.desktop.as_mut() {
-                    if let Some((id, _)) = desktop
-                        .tree
-                        .leaves()
-                        .into_iter()
-                        .find(|(_, app)| *app == AppKind::Files)
-                    {
-                        desktop.tree.set_focus(id);
+            if focused == AppKind::Viewer && self.slot().map(|s| s.viewer.is_open()).unwrap_or(false) {
+                if let Some(s) = self.slot_mut() {
+                    s.viewer.clear();
+                    if let Some((id, _)) = s.desktop.tree.leaves().into_iter().find(|(_, app)| *app == AppKind::Files) {
+                        s.desktop.tree.set_focus(id);
                     }
                 }
                 self.status = "viewer closed".into();
                 return Ok(());
             }
-            if let Some(id) = self.active_host_id.clone() {
-                let _ = self.hub.disconnect(&id).await;
-            }
-            self.screen = Screen::Launcher;
-            self.status = "back to launcher".into();
+            // Esc from desktop → close current session or return to launcher
+            self.close_current_session().await?;
             return Ok(());
         }
 
-        let Some(desktop) = self.desktop.as_mut() else {
+        let Some(desktop) = self.desktop_mut() else {
             return Ok(());
         };
 
@@ -847,20 +1033,20 @@ impl App {
         let focused = desktop.focused_app();
         match focused {
             AppKind::Terminal => {
-                if let Some(host_id) = &self.active_host_id {
-                    if self.hub.is_connected(host_id).await {
+                if let Some(host_id) = self.active_host_id().map(str::to_owned) {
+                    if self.hub.is_connected(&host_id).await {
                         let bytes = key_to_bytes(key);
                         if !bytes.is_empty() {
-                            let _ = self.hub.write_pty(host_id, &bytes).await;
+                            let _ = self.hub.write_pty(&host_id, &bytes).await;
                         }
                         return Ok(());
                     }
                 }
                 match key.code {
-                    KeyCode::Char(c) => self.demo_term.push(c),
-                    KeyCode::Enter => self.demo_term.push('\n'),
+                    KeyCode::Char(c) => { if let Some(s) = self.slot_mut() { s.demo_term.push(c); } }
+                    KeyCode::Enter => { if let Some(s) = self.slot_mut() { s.demo_term.push('\n'); } }
                     KeyCode::Backspace => {
-                        self.demo_term.pop();
+                        if let Some(s) = self.slot_mut() { s.demo_term.pop(); }
                     }
                     _ => {}
                 }
@@ -911,11 +1097,10 @@ impl App {
             _ => {}
         }
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.files.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.files.move_down(),
+            KeyCode::Up | KeyCode::Char('k') => { if let Some(s) = self.slot_mut() { s.files.move_up(); } }
+            KeyCode::Down | KeyCode::Char('j') => { if let Some(s) = self.slot_mut() { s.files.move_down(); } }
             KeyCode::Char(' ') => {
-                self.files.toggle_mark_selected();
-                self.files.move_down();
+                if let Some(s) = self.slot_mut() { s.files.toggle_mark_selected(); s.files.move_down(); }
             }
             KeyCode::Enter | KeyCode::Right => {
                 self.open_selected_file().await?;
@@ -925,40 +1110,36 @@ impl App {
                 self.open_selected_file().await?;
             }
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                if self.files.cwd != PathBuf::from("/") {
-                    let parent = join_remote(&self.files.cwd, "..");
-                    if self.files.online {
+                let (cwd, online) = self.slot().map(|s| (s.files.cwd.clone(), s.files.online)).unwrap_or_default();
+                if cwd != PathBuf::from("/") {
+                    let parent = join_remote(&cwd, "..");
+                    if online {
                         let _ = self.load_dir(parent).await;
                     } else {
-                        self.files = FilesState::demo();
+                        if let Some(s) = self.slot_mut() { s.files = FilesState::demo(); }
                     }
                 }
             }
             KeyCode::Char('r') => {
-                if self.files.online {
-                    let cwd = self.files.cwd.clone();
+                let (online, cwd) = self.slot().map(|s| (s.files.online, s.files.cwd.clone())).unwrap_or((false, PathBuf::new()));
+                if online {
                     let _ = self.load_dir(cwd).await;
                 } else {
                     self.status = "files · offline demo (connect for SFTP refresh)".into();
                 }
             }
             KeyCode::Char('e') => {
-                if let Some(row) = self.files.selected_row() {
-                    if let Some((path, is_dir)) =
-                        resolve_open_path(&self.files.cwd, row, &self.files.entries)
-                    {
-                        if !is_dir {
-                            self.open_path(path, true).await?;
-                        }
+                let (row, cwd, entries) = self.slot().map(|s| (s.files.selected_row(), s.files.cwd.clone(), s.files.entries.clone())).unwrap_or_default();
+                if let Some(row) = row {
+                    if let Some((path, is_dir)) = resolve_open_path(&cwd, row, &entries) {
+                        if !is_dir { self.open_path(path, true).await?; }
                     }
                 }
             }
-            KeyCode::Home => self.files.selected = 0,
+            KeyCode::Home => { if let Some(s) = self.slot_mut() { s.files.selected = 0; } }
             KeyCode::End => {
-                let len = self.files.rows().len();
-                if len > 0 {
-                    self.files.selected = len - 1;
-                }
+                let len = self.slot().map(|s| s.files.rows().len()).unwrap_or(0);
+                if len > 0 { if let Some(s) = self.slot_mut() { s.files.selected = len - 1; } }
             }
             _ => {}
         }
@@ -966,11 +1147,11 @@ impl App {
     }
 
     fn clipboard_copy_remote(&mut self) {
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return;
         };
-        let targets = self.files.clipboard_targets();
+        let targets = self.slot().map(|s| s.files.clipboard_targets()).unwrap_or_default();
         if targets.is_empty() {
             self.status = "nothing to copy".into();
             return;
@@ -985,11 +1166,11 @@ impl App {
     }
 
     fn clipboard_cut_remote(&mut self) {
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return;
         };
-        let targets = self.files.clipboard_targets();
+        let targets = self.slot().map(|s| s.files.clipboard_targets()).unwrap_or_default();
         if targets.is_empty() {
             self.status = "nothing to cut".into();
             return;
@@ -1004,16 +1185,16 @@ impl App {
     }
 
     async fn clipboard_paste_into_remote(&mut self) -> Result<()> {
-        let dest = self.files.cwd.clone();
+        let dest = self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default();
         self.paste_clipboard_into(dest, false).await
     }
 
     async fn paste_clipboard_into(&mut self, dest_dir: PathBuf, force_move: bool) -> Result<()> {
-        if !self.files.online {
+        if !self.slot().map(|s| s.files.online).unwrap_or(false) {
             self.status = "paste needs a live SFTP session".into();
             return Ok(());
         }
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return Ok(());
         };
@@ -1097,8 +1278,7 @@ impl App {
             self.clipboard.clear_files();
         }
 
-        self.files.clear_marks();
-        self.pending_files_refresh = true;
+        if let Some(s) = self.slot_mut() { s.files.clear_marks(); s.pending_files_refresh = true; }
         self.status = format!(
             "paste · {moved} moved · {queued} queued · {skipped} skipped → {}",
             dest_dir.display()
@@ -1107,7 +1287,7 @@ impl App {
     }
 
     async fn clipboard_paste_to_local(&mut self) -> Result<()> {
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no session".into();
             return Ok(());
         };
@@ -1158,7 +1338,7 @@ impl App {
         }
         if queued > 0 {
             self.status = format!("queued {queued} download(s) → {}", dest_dir.display());
-            if let Some(desktop) = self.desktop.as_mut() {
+            if let Some(desktop) = self.desktop_mut() {
                 if let Some((tid, _)) = desktop
                     .tree
                     .leaves()
@@ -1173,35 +1353,33 @@ impl App {
     }
 
     fn begin_upload_prompt(&mut self) {
-        if !self.files.online {
+        let (online, cwd) = self.slot().map(|s| (s.files.online, s.files.cwd.clone())).unwrap_or_default();
+        if !online {
             self.status = "upload needs a live SFTP session".into();
             return;
         }
-        self.path_prompt = Some(PathPrompt::upload(self.files.cwd.clone()));
+        self.path_prompt = Some(PathPrompt::upload(cwd));
         self.status = "upload · pick a local file (Enter) or type path".into();
     }
 
     fn begin_download_prompt(&mut self) {
-        if !self.files.online {
+        let (online, row, cwd, entries) = self.slot().map(|s| (
+            s.files.online,
+            s.files.selected_row(),
+            s.files.cwd.clone(),
+            s.files.entries.clone(),
+        )).unwrap_or_default();
+        if !online {
             self.status = "download needs a live SFTP session".into();
             return;
         }
-        let Some(row) = self.files.selected_row() else {
-            return;
-        };
-        let Some((path, is_dir)) = resolve_open_path(&self.files.cwd, row, &self.files.entries) else {
-            return;
-        };
+        let Some(row) = row else { return; };
+        let Some((path, is_dir)) = resolve_open_path(&cwd, row, &entries) else { return; };
         if is_dir {
             self.status = "select a file to download (dirs later)".into();
             return;
         }
-        let size = self
-            .files
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .and_then(|e| e.size);
+        let size = entries.iter().find(|e| e.path == path).and_then(|e| e.size);
         self.path_prompt = Some(PathPrompt::download(path, size));
         self.status = "download · confirm local path and press Enter".into();
     }
@@ -1302,7 +1480,7 @@ impl App {
             _ => {}
         }
 
-        let Some(host_id) = self.active_host_id.clone() else {
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
             self.status = "no active session".into();
             return Ok(());
         };
@@ -1310,7 +1488,7 @@ impl App {
             PathPromptKind::Upload => match self.hub.enqueue_upload(&host_id, local, remote).await {
                 Ok(id) => {
                     self.status = format!("queued upload · {}", id.0);
-                    if let Some(desktop) = self.desktop.as_mut() {
+                    if let Some(desktop) = self.desktop_mut() {
                         if let Some((tid, _)) = desktop
                             .tree
                             .leaves()
@@ -1340,7 +1518,7 @@ impl App {
                 {
                     Ok(id) => {
                         self.status = format!("queued download · {}", id.0);
-                        if let Some(desktop) = self.desktop.as_mut() {
+                        if let Some(desktop) = self.desktop_mut() {
                             if let Some((tid, _)) = desktop
                                 .tree
                                 .leaves()
@@ -1361,17 +1539,17 @@ impl App {
 
     async fn handle_transfers_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.transfers.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.transfers.move_down(),
+            KeyCode::Up | KeyCode::Char('k') => { if let Some(s) = self.slot_mut() { s.transfers.move_up(); } }
+            KeyCode::Down | KeyCode::Char('j') => { if let Some(s) = self.slot_mut() { s.transfers.move_down(); } }
             KeyCode::Char('c') => {
-                if let Some(id) = self.transfers.selected_id() {
+                if let Some(id) = self.slot().and_then(|s| s.transfers.selected_id()) {
                     if self.hub.cancel_transfer(id).await {
                         self.status = "transfer cancel requested".into();
                     }
                 }
             }
             KeyCode::Char('r') => {
-                if let Some(id) = self.transfers.selected_id() {
+                if let Some(id) = self.slot().and_then(|s| s.transfers.selected_id()) {
                     match self.hub.retry_transfer(id).await {
                         Ok(new_id) => self.status = format!("retry queued · {}", new_id.0),
                         Err(e) => self.status = format!("retry failed · {e}"),
@@ -1394,14 +1572,15 @@ impl App {
 
     async fn handle_viewer_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.viewer.scroll_by(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.viewer.scroll_by(1),
-            KeyCode::PageUp => self.viewer.scroll_by(-10),
-            KeyCode::PageDown => self.viewer.scroll_by(10),
-            KeyCode::Home => self.viewer.scroll = 0,
+            KeyCode::Up | KeyCode::Char('k') => { if let Some(s) = self.slot_mut() { s.viewer.scroll_by(-1); } }
+            KeyCode::Down | KeyCode::Char('j') => { if let Some(s) = self.slot_mut() { s.viewer.scroll_by(1); } }
+            KeyCode::PageUp => { if let Some(s) = self.slot_mut() { s.viewer.scroll_by(-10); } }
+            KeyCode::PageDown => { if let Some(s) = self.slot_mut() { s.viewer.scroll_by(10); } }
+            KeyCode::Home => { if let Some(s) = self.slot_mut() { s.viewer.scroll = 0; } }
             KeyCode::Char('e') => {
-                if let Some(path) = self.viewer.path.clone() {
-                    if !self.viewer.binary {
+                let (path, binary) = self.slot().map(|s| (s.viewer.path.clone(), s.viewer.binary)).unwrap_or_default();
+                if let Some(path) = path {
+                    if !binary {
                         self.open_path(path, true).await?;
                     } else {
                         self.status = "cannot edit binary/hex view".into();
@@ -1409,7 +1588,7 @@ impl App {
                 }
             }
             KeyCode::Char('q') => {
-                self.viewer.clear();
+                if let Some(s) = self.slot_mut() { s.viewer.clear(); }
                 self.status = "viewer closed".into();
             }
             _ => {}
@@ -1426,20 +1605,20 @@ impl App {
             _ => {}
         }
         match key.code {
-            KeyCode::Left => self.editor.move_left(),
-            KeyCode::Right => self.editor.move_right(),
-            KeyCode::Up => self.editor.move_up(),
-            KeyCode::Down => self.editor.move_down(),
-            KeyCode::Home => self.editor.cursor_col = 0,
+            KeyCode::Left => { if let Some(s) = self.slot_mut() { s.editor.move_left(); } }
+            KeyCode::Right => { if let Some(s) = self.slot_mut() { s.editor.move_right(); } }
+            KeyCode::Up => { if let Some(s) = self.slot_mut() { s.editor.move_up(); } }
+            KeyCode::Down => { if let Some(s) = self.slot_mut() { s.editor.move_down(); } }
+            KeyCode::Home => { if let Some(s) = self.slot_mut() { s.editor.cursor_col = 0; } }
             KeyCode::End => {
-                self.editor.cursor_col = self.editor.lines[self.editor.cursor_row]
-                    .chars()
-                    .count();
+                if let Some(s) = self.slot_mut() {
+                    s.editor.cursor_col = s.editor.lines[s.editor.cursor_row].chars().count();
+                }
             }
-            KeyCode::Enter => self.editor.insert_newline(),
-            KeyCode::Backspace => self.editor.backspace(),
+            KeyCode::Enter => { if let Some(s) = self.slot_mut() { s.editor.insert_newline(); } }
+            KeyCode::Backspace => { if let Some(s) = self.slot_mut() { s.editor.backspace(); } }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.editor.insert_char(c);
+                if let Some(s) = self.slot_mut() { s.editor.insert_char(c); }
             }
             _ => {}
         }
@@ -1449,14 +1628,14 @@ impl App {
             .and_then(|g| g.files_pane_inner)
             .map(|r| r.height.saturating_sub(2).max(4))
             .unwrap_or(20);
-        self.editor.ensure_visible(height);
+        if let Some(s) = self.slot_mut() { s.editor.ensure_visible(height); }
         Ok(())
     }
 
     async fn handle_processes_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.processes.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.processes.move_down(),
+            KeyCode::Up | KeyCode::Char('k') => { if let Some(s) = self.slot_mut() { s.processes.move_up(); } }
+            KeyCode::Down | KeyCode::Char('j') => { if let Some(s) = self.slot_mut() { s.processes.move_down(); } }
             KeyCode::Char('r') => {
                 self.refresh_processes().await?;
             }
@@ -1474,41 +1653,38 @@ impl App {
     }
 
     fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> Result<()> {
-        if self.desktop.is_none() || self.last_geo.is_none() {
+        if self.sessions.is_empty() || self.last_geo.is_none() {
             return Ok(());
         }
-        let geo = self.last_geo.as_ref().unwrap();
-
         let pos = (mouse.column, mouse.row);
         let mods = mouse.modifiers;
+        let last_geo = self.last_geo.take();
+        let (pane_id, files_row) = {
+            let geo = last_geo.as_ref().unwrap();
+            let pane_id = geo.pane_at(pos.0, pos.1).map(|p| p.id);
+            let files_row = geo.files_row_at(pos.0, pos.1).cloned();
+            (pane_id, files_row)
+        };
+        self.last_geo = last_geo;
 
         match mouse.kind {
             MouseEventKind::Down(event::MouseButton::Left) => {
-                if let Some(pane) = geo.pane_at(pos.0, pos.1) {
-                    let id = pane.id;
-                    if let Some(desktop) = self.desktop.as_mut() {
+                if let Some(id) = pane_id {
+                    if let Some(desktop) = self.desktop_mut() {
                         desktop.tree.set_focus(id);
                     }
                 }
 
-                if let Some(row) = geo.files_row_at(pos.0, pos.1) {
+                if let Some(row) = files_row {
                     if let Some(entry_idx) = row.entry_index {
-                        self.files.selected = row.row_index;
-                        let indices = if self.files.is_marked(entry_idx) {
-                            self.files.marked.clone()
-                        } else {
-                            vec![entry_idx]
-                        };
-                        self.mouse_press = Some(MousePress {
-                            origin: pos,
-                            entry_indices: indices,
-                        });
+                        let already_marked = self.slot().map(|s| s.files.is_marked(entry_idx)).unwrap_or(false);
+                        let marked = self.slot().map(|s| s.files.marked.clone()).unwrap_or_default();
+                        if let Some(s) = self.slot_mut() { s.files.selected = row.row_index; }
+                        let indices = if already_marked { marked } else { vec![entry_idx] };
+                        self.mouse_press = Some(MousePress { origin: pos, entry_indices: indices });
                     } else {
-                        self.files.selected = row.row_index;
-                        self.mouse_press = Some(MousePress {
-                            origin: pos,
-                            entry_indices: Vec::new(),
-                        });
+                        if let Some(s) = self.slot_mut() { s.files.selected = row.row_index; }
+                        self.mouse_press = Some(MousePress { origin: pos, entry_indices: Vec::new() });
                     }
                 } else {
                     self.mouse_press = None;
@@ -1520,13 +1696,14 @@ impl App {
                     let dy = pos.1.abs_diff(press.origin.1);
                     if self.drag.is_none() && (dx >= 1 || dy >= 1) && !press.entry_indices.is_empty()
                     {
-                        let Some(host_id) = self.active_host_id.clone() else {
+                        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
                             return Ok(());
                         };
+                        let slot_entries = self.slot().map(|s| s.files.entries.clone()).unwrap_or_default();
                         let files: Vec<FileEntry> = press
                             .entry_indices
                             .iter()
-                            .filter_map(|i| self.files.entries.get(*i))
+                            .filter_map(|i| slot_entries.get(*i))
                             .map(|e| FileEntry::remote(&host_id, e.path.clone(), e.is_dir))
                             .collect();
                         if files.is_empty() {
@@ -1542,7 +1719,7 @@ impl App {
                 if let Some(drag) = self.drag.as_mut() {
                     drag.move_to(pos);
                 }
-                let cwd = self.files.cwd.clone();
+                let cwd = self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default();
                 if let Some(geo) = self.last_geo.as_ref() {
                     self.drop_target = Some(geo.drop_target_at(pos.0, pos.1, &cwd));
                     if let Some(t) = &self.drop_target {
@@ -1567,7 +1744,7 @@ impl App {
                     });
                 } else if let Some(press) = self.mouse_press.take() {
                     if press.entry_indices.is_empty() {
-                        if let Some(FilesRow::Parent) = self.files.selected_row() {
+                        if self.slot().and_then(|s| s.files.selected_row()).as_ref() == Some(&FilesRow::Parent) {
                             self.pending_open_parent = true;
                         }
                     }
@@ -1579,9 +1756,9 @@ impl App {
                     if let Some(drag) = self.drag.as_mut() {
                         drag.move_to(pos);
                     }
-                    let cwd = self.files.cwd.clone();
+                    let cwd2 = self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default();
                     if let Some(geo) = self.last_geo.as_ref() {
-                        self.drop_target = Some(geo.drop_target_at(pos.0, pos.1, &cwd));
+                        self.drop_target = Some(geo.drop_target_at(pos.0, pos.1, &cwd2));
                     }
                 }
             }
@@ -1602,7 +1779,7 @@ impl App {
                 }
                 let dest = match &pending.target {
                     DropTarget::Folder { path, .. } => path.clone(),
-                    DropTarget::TransferDock => self.files.cwd.clone(),
+                    DropTarget::TransferDock => self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default(),
                     DropTarget::Ask => {
                         self.status = "drop cancelled · no target".into();
                         return Ok(());
@@ -1616,7 +1793,7 @@ impl App {
                 self.clipboard.set_files(files, op);
                 self.paste_clipboard_into(dest, pending.force_move).await?;
                 if matches!(pending.target, DropTarget::TransferDock) {
-                    if let Some(desktop) = self.desktop.as_mut() {
+                    if let Some(desktop) = self.desktop_mut() {
                         if let Some((tid, _)) = desktop
                             .tree
                             .leaves()
@@ -1636,9 +1813,9 @@ impl App {
                 }
                 let dest = pending
                     .target
-                    .remote_dir(&self.files.cwd)
-                    .unwrap_or_else(|| self.files.cwd.clone());
-                if self.files.online {
+                    .remote_dir(&self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default())
+                    .unwrap_or_else(|| self.slot().map(|s| s.files.cwd.clone()).unwrap_or_default());
+                if self.slot().map(|s| s.files.online).unwrap_or(false) {
                     self.os_drop = Some(OsDropOffer::new(files, dest));
                     self.status = "OS drop · confirm upload · Enter/y · Esc".into();
                 } else {
@@ -1649,7 +1826,16 @@ impl App {
         Ok(())
     }
 
-    fn frame_model(&self) -> UiFrame<'_> {
+    fn frame_model<'a>(&'a self) -> UiFrame<'a> {
+        let slot = self.slot();
+        let desktop = slot.map(|s| &s.desktop);
+        let term_buffer = slot.map(|s| s.demo_term.as_str()).unwrap_or("");
+        let files: &FilesState = slot.map(|s| &s.files).unwrap_or(empty_files());
+        let viewer: &ViewerState = slot.map(|s| &s.viewer).unwrap_or(empty_viewer());
+        let editor: &EditorState = slot.map(|s| &s.editor).unwrap_or(empty_editor());
+        let processes: &ProcessesState = slot.map(|s| &s.processes).unwrap_or(empty_procs());
+        let transfers: &TransfersUi = slot.map(|s| &s.transfers).unwrap_or(empty_xfer());
+
         UiFrame {
             screen: match self.screen {
                 Screen::Launcher => ui::ScreenKind::Launcher,
@@ -1657,20 +1843,24 @@ impl App {
             },
             hosts: &self.hosts,
             selected_host: self.selected_host,
-            desktop: self.desktop.as_ref(),
+            sessions: self.sessions.iter().map(|s| s.host_name.as_str()).collect(),
+            active_session_idx: self.active_idx,
+            show_session_switcher: self.show_session_switcher,
+            full_screen: self.full_screen,
+            desktop,
             status: &self.status,
-            term_buffer: &self.demo_term,
+            term_buffer,
             clipboard_has_files: self.clipboard.has_files(),
             clipboard_label: match self.clipboard.file_op() {
                 Some(ssh_os::FileOp::Copy) => "copy",
                 Some(ssh_os::FileOp::Cut) => "cut",
                 None => "",
             },
-            files: &self.files,
-            viewer: &self.viewer,
-            editor: &self.editor,
-            processes: &self.processes,
-            transfers: &self.transfers,
+            files,
+            viewer,
+            editor,
+            processes,
+            transfers,
             path_prompt: self.path_prompt.as_ref(),
             host_form: self.host_form.as_ref(),
             vault_unlock: self.vault_unlock.as_ref(),
@@ -1679,6 +1869,34 @@ impl App {
             os_drop: self.os_drop.as_ref(),
         }
     }
+}
+
+
+// Empty-state references for the frame_model fallbacks (no active session).
+fn empty_files() -> &'static FilesState {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<FilesState> = OnceLock::new();
+    CELL.get_or_init(FilesState::default)
+}
+fn empty_viewer() -> &'static ViewerState {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<ViewerState> = OnceLock::new();
+    CELL.get_or_init(ViewerState::default)
+}
+fn empty_editor() -> &'static EditorState {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<EditorState> = OnceLock::new();
+    CELL.get_or_init(EditorState::default)
+}
+fn empty_procs() -> &'static ProcessesState {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<ProcessesState> = OnceLock::new();
+    CELL.get_or_init(ProcessesState::default)
+}
+fn empty_xfer() -> &'static TransfersUi {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<TransfersUi> = OnceLock::new();
+    CELL.get_or_init(TransfersUi::default)
 }
 
 #[derive(Debug, Clone)]
@@ -1732,19 +1950,21 @@ pub async fn run() -> Result<()> {
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         app.drain_events();
-        if app.pending_files_refresh {
-            app.pending_files_refresh = false;
-            let cwd = app.files.cwd.clone();
+        // Per-slot deferred refreshes.
+        if app.slot().map(|s| s.pending_files_refresh).unwrap_or(false) {
+            if let Some(s) = app.slot_mut() { s.pending_files_refresh = false; }
+            let cwd = app.slot().map(|s| s.files.cwd.clone()).unwrap_or_default();
             let _ = app.load_dir(cwd).await;
         }
         if app.pending_open_parent {
             app.pending_open_parent = false;
-            if app.files.cwd != PathBuf::from("/") {
-                let parent = join_remote(&app.files.cwd, "..");
-                if app.files.online {
+            let (cwd, online) = app.slot().map(|s| (s.files.cwd.clone(), s.files.online)).unwrap_or_default();
+            if cwd != PathBuf::from("/") {
+                let parent = join_remote(&cwd, "..");
+                if online {
                     let _ = app.load_dir(parent).await;
                 } else {
-                    app.files = FilesState::demo();
+                    if let Some(s) = app.slot_mut() { s.files = FilesState::demo(); }
                 }
             }
         }
@@ -1758,8 +1978,8 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
                 height: s.height,
             }
         })?;
-        if let Some(desktop) = app.desktop.as_ref() {
-            app.last_geo = Some(hit::compute_frame_geo(area, desktop, &app.files));
+        if let (Some(desktop), Some(files)) = (app.desktop(), app.slot().map(|s| &s.files)) {
+            app.last_geo = Some(hit::compute_frame_geo(area, desktop, files));
         } else {
             app.last_geo = None;
         }

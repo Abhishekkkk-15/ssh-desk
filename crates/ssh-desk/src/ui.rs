@@ -26,6 +26,11 @@ pub struct UiFrame<'a> {
     pub screen: ScreenKind,
     pub hosts: &'a [HostProfile],
     pub selected_host: usize,
+    /// Names of all open sessions, for the tab bar.
+    pub sessions: Vec<&'a str>,
+    pub active_session_idx: usize,
+    pub show_session_switcher: bool,
+    pub full_screen: bool,
     pub desktop: Option<&'a Desktop>,
     pub status: &'a str,
     pub term_buffer: &'a str,
@@ -46,6 +51,32 @@ pub struct UiFrame<'a> {
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let area = frame.area();
+    
+    if model.screen == ScreenKind::Desktop && model.full_screen {
+        if let Some(desktop) = model.desktop {
+            draw_desktop(frame, area, desktop, model);
+        }
+        if model.show_session_switcher {
+            draw_session_switcher(frame, model);
+        }
+        if let Some(prompt) = model.path_prompt {
+            draw_path_prompt(frame, area, prompt);
+        }
+        if let Some(form) = model.host_form {
+            draw_host_form(frame, area, form);
+        }
+        if let Some(unlock) = model.vault_unlock {
+            draw_vault_unlock(frame, area, unlock);
+        }
+        if let Some(offer) = model.os_drop {
+            draw_os_drop_confirm(frame, area, offer);
+        }
+        if let Some(drag) = model.drag {
+            draw_drag_ghost(frame, drag, model.drop_target);
+        }
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -67,6 +98,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     draw_dock(frame, chunks[2], model);
     draw_status(frame, chunks[3], model);
+    if model.show_session_switcher {
+        draw_session_switcher(frame, model);
+    }
     if let Some(prompt) = model.path_prompt {
         draw_path_prompt(frame, area, prompt);
     }
@@ -85,35 +119,104 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
-    let title = match model.screen {
-        ScreenKind::Launcher => Line::from(vec![
-            Span::styled(
-                " ssh-desk ",
+    let mut spans = vec![Span::styled(
+        " ssh-desk ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    match model.screen {
+        ScreenKind::Launcher => {
+            spans.push(Span::styled(
+                " remote OS shell  ·  launcher",
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        ScreenKind::Desktop => {
+            if model.sessions.len() <= 1 {
+                let name = model.desktop.map(|d| d.title.as_str()).unwrap_or("session");
+                spans.push(Span::styled(
+                    format!(" desktop · {name}"),
+                    Style::default().fg(Color::Gray),
+                ));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+                for (i, name) in model.sessions.iter().enumerate() {
+                    let active = i == model.active_session_idx;
+                    let label = format!(" {}:{} ", i + 1, name);
+                    let style = if active {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    spans.push(Span::styled(label, style));
+                    spans.push(Span::raw(" "));
+                }
+
+                // Only render keyboard help hints if they fit in the terminal area width
+                let total_chars: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                if area.width as usize > total_chars + 36 {
+                    spans.push(Span::styled(
+                        "│ Ctrl+Tab switch · F8 list · Ctrl+W close ",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black)),
+        area,
+    );
+}
+
+/// Session-switcher overlay (F8).
+fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
+    let area = frame.area();
+    let width = 40u16.min(area.width.saturating_sub(4));
+    let height = (model.sessions.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let rect = Rect { x, y, width, height };
+
+    frame.render_widget(Clear, rect);
+
+    let mut items: Vec<ListItem> = model
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let marker = if i == model.active_session_idx { "▶ " } else { "  " };
+            let key = if i < 9 { (b'1' + i as u8) as char } else { ' ' };
+            let label = format!("{marker}[{key}] {name}");
+            let style = if i == model.active_session_idx {
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" remote OS shell  ·  launcher"),
-        ]),
-        ScreenKind::Desktop => {
-            let name = model
-                .desktop
-                .map(|d| d.title.as_str())
-                .unwrap_or("session");
-            Line::from(vec![
-                Span::styled(
-                    " ssh-desk ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(" desktop · {name}")),
-            ])
-        }
-    };
-    frame.render_widget(Paragraph::new(title), area);
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(Line::from(Span::styled(label, style)))
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from("No sessions open")));
+    }
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Sessions  (j/k·1-9·Enter·F8) ")
+            .border_style(Style::default().fg(Color::Green)),
+    );
+    frame.render_widget(list, rect);
 }
 
 fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
@@ -128,9 +231,10 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         .enumerate()
         .map(|(i, h)| {
             let marker = if i == model.selected_host { "●" } else { "○" };
+            let jump = h.jump_via.as_deref().map(|j| format!(" via:{j}")).unwrap_or_default();
             let line = format!(
-                " {marker} {}  {}@{}:{}",
-                h.name, h.user, h.host, h.port
+                " {marker} {}  {}@{}:{}{}",
+                h.name, h.user, h.host, h.port, jump
             );
             let style = if i == model.selected_host {
                 Style::default()
