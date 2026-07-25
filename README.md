@@ -50,7 +50,8 @@ Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP 
 - Default 4-pane layout: **Shell | Files** over **Processes | Transfers**
 - Open / close / focus panes; restore last layout on quit
 - Pane fullscreen (`F11`) and chrome hide (`Ctrl+F`)
-- Tokyo Night–inspired UI theme (fixed palette)
+- **Light / dark theme** (`Ctrl+T`) and **compact dock** (`Ctrl+Shift+D`) — saved in `config.toml`
+- Tokyo Night–inspired UI theme (dark default + light variant)
 
 ### Shell
 - Live PTY over SSH with **VT100** emulation (colors, cursor, resize)
@@ -170,6 +171,7 @@ cargo run -p ssh-desk --release
 | `~/.config/ssh-desk/secrets/` | age-encrypted password blobs |
 | `~/.config/ssh-desk/known_hosts` | TOFU SSH host keys |
 | `~/.config/ssh-desk/session.json` | Last open tabs / layouts (written on quit) |
+| `~/.config/ssh-desk/config.toml` | UI prefs: `theme` (`dark`/`light`), `compact_dock` |
 | `~/.local/state/ssh-desk/ssh-desk.log` | Runtime log (falls back under config dir if no XDG state) |
 
 On Windows, `dirs` resolves the equivalent under `%APPDATA%` / `%LOCALAPPDATA%`.
@@ -288,6 +290,8 @@ Overwrite existing targets: confirm dialog (Yes / No).
 | Key | Action |
 |-----|--------|
 | `Ctrl+N` | Hosts launcher (keeps open sessions) |
+| `Ctrl+T` | Toggle light / dark theme |
+| `Ctrl+Shift+D` | Compact / full dock labels |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous host session |
 | `F8` | Session picker (`j`/`k`, digits `1`–`9`, `Enter`/`Esc`/`F8` close) |
 | `F9` | Diagnostics (`j`/`k`, `PgUp`/`PgDn`, `Home`/`End`, `c` clear, `Esc`/`F9` close) |
@@ -456,7 +460,6 @@ Manual only (`workflow_dispatch` in the Actions UI). Builds all platform archive
 - **OS folder drag-and-drop** often ignored by terminals; use path picker / typed path for directories.
 - **Windows ARM64** — no prebuilt asset yet (use WSL or source build).
 - **Jump hosts** — supported in core/vault fields; not fully exposed in the add-host form.
-- **Theme** — fixed Tokyo Night–inspired palette (not configurable yet).
 - Limited automated coverage beyond unit tests; soak-test on real hosts before critical use.
 
 ---

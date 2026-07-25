@@ -12,6 +12,7 @@ mod term;
 mod theme;
 mod transfers;
 mod ui;
+mod ui_prefs;
 
 use std::fs::OpenOptions;
 use std::process::ExitCode;
@@ -38,9 +39,10 @@ Options:
   -h, --help       Print help
   -V, --version    Print version
 
-Config:  ~/.config/ssh-desk/
+Config:  ~/.config/ssh-desk/ (hosts.toml, config.toml, session.json)
 State:   ~/.local/state/ssh-desk/ (logs)
 Session: ~/.config/ssh-desk/session.json (restored on start)
+Prefs:   ~/.config/ssh-desk/config.toml (theme, compact_dock)
 "
     );
 }

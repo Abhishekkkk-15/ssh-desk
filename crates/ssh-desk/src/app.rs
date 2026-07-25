@@ -35,8 +35,10 @@ use crate::hit::{self, FrameGeo};
 use crate::hostform::{HostForm, VaultUnlockPrompt};
 use crate::session::{self, PersistedHostSession, PersistedSession};
 use crate::term::TermEmulator;
+use crate::theme;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
+use crate::ui_prefs::{self, UiConfig};
 use ssh_os::OpenAction;
 use ssh_os::sniff_open_action;
 
@@ -124,6 +126,7 @@ pub struct App {
     /// Show the session-switcher overlay.
     show_session_switcher: bool,
     full_screen: bool,
+    compact_dock: bool,
     files_search: Option<String>,
     should_quit: bool,
     connect_in_flight: bool,
@@ -210,6 +213,7 @@ impl App {
         events_rx: mpsc::UnboundedReceiver<SessionEvent>,
     ) -> Self {
         let hosts = vault.hosts().to_vec();
+        let prefs = ui_prefs::load();
         Self {
             screen: Screen::Launcher,
             vault,
@@ -233,6 +237,7 @@ impl App {
             os_drop: None,
             show_session_switcher: false,
             full_screen: false,
+            compact_dock: prefs.compact_dock,
             files_search: None,
             should_quit: false,
             connect_in_flight: false,
@@ -247,6 +252,33 @@ impl App {
             pending_cross_host_uploads: VecDeque::new(),
             pending_cross_host_cuts: VecDeque::new(),
         }
+    }
+
+    fn persist_ui_prefs(&self) {
+        let cfg = UiConfig {
+            theme: theme::current_theme(),
+            compact_dock: self.compact_dock,
+        };
+        if let Err(e) = ui_prefs::save(&cfg) {
+            tracing::warn!(error = %e, "failed to save config.toml");
+        }
+    }
+
+    fn toggle_theme(&mut self) {
+        let next = theme::current_theme().toggle();
+        theme::set_theme(next);
+        self.persist_ui_prefs();
+        self.status = format!("theme · {} · Ctrl+T to toggle", next.as_str());
+    }
+
+    fn toggle_compact_dock(&mut self) {
+        self.compact_dock = !self.compact_dock;
+        self.persist_ui_prefs();
+        self.status = if self.compact_dock {
+            "dock · compact · Ctrl+Shift+D to expand".into()
+        } else {
+            "dock · full labels · Ctrl+Shift+D to compact".into()
+        };
     }
 
     fn note(&mut self, level: DiagLevel, msg: impl Into<String>) {
@@ -1566,6 +1598,16 @@ impl App {
     }
 
     async fn handle_launcher_key(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if ctrl && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T')) && !shift {
+            self.toggle_theme();
+            return Ok(());
+        }
+        if ctrl && shift && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+            self.toggle_compact_dock();
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.request_quit();
@@ -1873,6 +1915,14 @@ impl App {
                 "decorations visible"
             };
             self.status = format!("full-screen mode {mode} · press Ctrl+F to toggle");
+            return Ok(());
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T')) && !shift {
+            self.toggle_theme();
+            return Ok(());
+        }
+        if ctrl && shift && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+            self.toggle_compact_dock();
             return Ok(());
         }
         if self.show_session_switcher {
@@ -3332,6 +3382,7 @@ impl App {
             active_session_idx: self.active_idx,
             show_session_switcher: self.show_session_switcher,
             full_screen: self.full_screen,
+            compact_dock: self.compact_dock,
             fullscreen_app: self.slot().and_then(|s| s.fullscreen_app),
             desktop,
             status: if let Some(_q) = &self.files_search {

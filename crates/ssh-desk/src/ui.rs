@@ -38,6 +38,8 @@ pub struct UiFrame<'a> {
     pub active_session_idx: usize,
     pub show_session_switcher: bool,
     pub full_screen: bool,
+    /// Short dock labels (Sh/Fi/…) when true.
+    pub compact_dock: bool,
     pub fullscreen_app: Option<AppKind>,
     pub desktop: Option<&'a Desktop>,
     pub status: &'a str,
@@ -66,7 +68,7 @@ pub struct UiFrame<'a> {
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let area = frame.area();
     // Soft slate canvas (avoid pure pitch-black).
-    frame.render_widget(Block::default().style(Style::default().bg(Th::BG)), area);
+    frame.render_widget(Block::default().style(Style::default().bg(Th::bg())), area);
     if model.screen == ScreenKind::Desktop && model.full_screen {
         if let Some(desktop) = model.desktop {
             draw_desktop(frame, area, desktop, model);
@@ -160,11 +162,11 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Span::styled(
             " ssh-desk ",
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("▌", Style::default().fg(Th::ACCENT).bg(Th::CHROME)),
+        Span::styled("▌", Style::default().fg(Th::accent()).bg(Th::chrome())),
     ];
 
     match model.screen {
@@ -172,13 +174,13 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             spans.push(Span::styled(
                 " LAUNCHER ",
                 Style::default()
-                    .fg(Th::ACCENT)
-                    .bg(Th::CHROME)
+                    .fg(Th::accent())
+                    .bg(Th::chrome())
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 " remote OS shell",
-                Style::default().fg(Th::FG_MUTED).bg(Th::CHROME),
+                Style::default().fg(Th::fg_muted()).bg(Th::chrome()),
             ));
         }
         ScreenKind::Desktop => {
@@ -187,23 +189,23 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 spans.push(Span::styled(
                     " DESKTOP ",
                     Style::default()
-                        .fg(Th::ACCENT)
-                        .bg(Th::CHROME)
+                        .fg(Th::accent())
+                        .bg(Th::chrome())
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     format!(" {name} "),
                     Style::default()
-                        .fg(Th::FG)
-                        .bg(Th::CHROME)
+                        .fg(Th::fg())
+                        .bg(Th::chrome())
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::styled(
                     " SESSIONS ",
                     Style::default()
-                        .fg(Th::ACCENT)
-                        .bg(Th::CHROME)
+                        .fg(Th::accent())
+                        .bg(Th::chrome())
                         .add_modifier(Modifier::BOLD),
                 ));
                 for (i, name) in model.sessions.iter().enumerate() {
@@ -211,11 +213,11 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                     let label = format!(" {}:{} ", i + 1, name);
                     let style = if active {
                         Style::default()
-                            .fg(Th::ON_ACCENT)
-                            .bg(Th::OK)
+                            .fg(Th::on_accent())
+                            .bg(Th::ok())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Th::FG_DIM).bg(Th::CHROME)
+                        Style::default().fg(Th::fg_dim()).bg(Th::chrome())
                     };
                     spans.push(Span::styled(label, style));
                 }
@@ -224,7 +226,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 if area.width as usize > total_chars + 36 {
                     spans.push(Span::styled(
                         " │ Ctrl+Tab · F8 · Ctrl+W ",
-                        Style::default().fg(Th::FG_DIM).bg(Th::CHROME),
+                        Style::default().fg(Th::fg_dim()).bg(Th::chrome()),
                     ));
                 }
             }
@@ -233,7 +235,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
     // Fill remaining title bar so the strip reads as one solid band.
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::CHROME)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::chrome())),
         area,
     );
 }
@@ -268,11 +270,11 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
             let label = format!("{marker}[{key}] {name}");
             let style = if i == model.active_session_idx {
                 Style::default()
-                    .fg(Th::ON_ACCENT)
-                    .bg(Th::OK)
+                    .fg(Th::on_accent())
+                    .bg(Th::ok())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Th::FG)
+                Style::default().fg(Th::fg())
             };
             ListItem::new(Line::from(Span::styled(label, style)))
         })
@@ -285,7 +287,7 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Sessions  (j/k·1-9·Enter·F8) ")
-            .border_style(Style::default().fg(Th::OK)),
+            .border_style(Style::default().fg(Th::ok())),
     );
     frame.render_widget(list, rect);
 }
@@ -318,9 +320,11 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 h.name, h.user, h.host, h.port, jump, open_tag
             );
             let style = if i == model.selected_host {
-                Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Th::accent())
+                    .add_modifier(Modifier::BOLD)
             } else if open {
-                Style::default().fg(Th::INFO)
+                Style::default().fg(Th::info())
             } else {
                 Style::default()
             };
@@ -337,7 +341,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Block::default()
             .borders(Borders::ALL)
             .title(host_title)
-            .border_style(Style::default().fg(Th::FG_DIM)),
+            .border_style(Style::default().fg(Th::fg_dim())),
     );
     frame.render_widget(list, chunks[0]);
 
@@ -368,7 +372,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Welcome ")
-                .border_style(Style::default().fg(Th::FG_DIM)),
+                .border_style(Style::default().fg(Th::fg_dim())),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(help, chunks[1]);
@@ -420,18 +424,18 @@ fn draw_pane_leaf(
     model: &UiFrame<'_>,
 ) {
     let border = if drop_hot {
-        Style::default().fg(Th::WARN).add_modifier(Modifier::BOLD)
+        Style::default().fg(Th::warn()).add_modifier(Modifier::BOLD)
     } else if focused {
-        Style::default().fg(Th::ACCENT)
+        Style::default().fg(Th::accent())
     } else {
-        Style::default().fg(Th::FG_DIM)
+        Style::default().fg(Th::fg_dim())
     };
 
     // Border only — title lives in a dedicated header strip below.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .style(Style::default().bg(Th::BG));
+        .style(Style::default().bg(Th::bg()));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -463,11 +467,11 @@ fn draw_pane_header(
     let focus_mark = if focused { " ●" } else { "" };
 
     let (fg, bg) = if drop_hot {
-        (Th::ON_ACCENT, Th::WARN)
+        (Th::on_accent(), Th::warn())
     } else if focused {
-        (Th::ON_ACCENT, Th::ACCENT)
+        (Th::on_accent(), Th::accent())
     } else {
-        (Th::FG_MUTED, Th::SURFACE)
+        (Th::fg_muted(), Th::surface())
     };
 
     let mut spans = vec![Span::styled(
@@ -478,7 +482,7 @@ fn draw_pane_header(
     if !detail.is_empty() {
         spans.push(Span::styled(
             format!(" {detail} "),
-            Style::default().fg(Th::FG_DIM).bg(bg),
+            Style::default().fg(Th::fg_dim()).bg(bg),
         ));
     }
 
@@ -570,7 +574,7 @@ fn draw_files(
     if let Some(err) = &files.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Th::WARN),
+            Style::default().fg(Th::warn()),
         )));
     }
     if files.loading {
@@ -582,7 +586,9 @@ fn draw_files(
             "  {:<10} {:>8}  {:<16}  {}",
             "MODE", "SIZE", "MODIFIED", "NAME"
         ),
-        Style::default().fg(Th::FG_DIM).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Th::fg_dim())
+            .add_modifier(Modifier::BOLD),
     )));
 
     let prefix = lines.len();
@@ -631,20 +637,20 @@ fn draw_files(
         let is_drop = drop_path.is_some_and(|dp| row_path.as_ref().is_some_and(|rp| rp == dp));
         let style = if is_drop {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::WARN)
+                .fg(Th::on_accent())
+                .bg(Th::warn())
                 .add_modifier(Modifier::BOLD)
         } else if selected && focused {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD)
         } else if selected {
-            Style::default().fg(Th::ACCENT)
+            Style::default().fg(Th::accent())
         } else if is_dir {
-            Style::default().fg(Th::ACCENT_2)
+            Style::default().fg(Th::accent_2())
         } else {
-            Style::default().fg(Th::FG)
+            Style::default().fg(Th::fg())
         };
         lines.push(Line::from(Span::styled(label, style)));
     }
@@ -652,7 +658,7 @@ fn draw_files(
     if rows.is_empty() && files.error.is_none() && !files.loading {
         lines.push(Line::from(Span::styled(
             "  (empty)  ·  a mkdir · R rename · d delete",
-            Style::default().fg(Th::FG_DIM),
+            Style::default().fg(Th::fg_dim()),
         )));
     }
 
@@ -664,7 +670,7 @@ fn draw_files(
         };
         lines.push(Line::from(Span::styled(
             help,
-            Style::default().fg(Th::FG_DIM),
+            Style::default().fg(Th::fg_dim()),
         )));
     }
 
@@ -696,16 +702,16 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
             );
             let style = if selected && focused {
                 Style::default()
-                    .fg(Th::ON_ACCENT)
-                    .bg(Th::ACCENT)
+                    .fg(Th::on_accent())
+                    .bg(Th::accent())
                     .add_modifier(Modifier::BOLD)
             } else if selected {
-                Style::default().fg(Th::ACCENT)
+                Style::default().fg(Th::accent())
             } else {
                 match job.status {
-                    ssh_core::TransferStatus::Failed => Style::default().fg(Th::ERR),
-                    ssh_core::TransferStatus::Done => Style::default().fg(Th::OK),
-                    ssh_core::TransferStatus::Running => Style::default().fg(Th::WARN),
+                    ssh_core::TransferStatus::Failed => Style::default().fg(Th::err()),
+                    ssh_core::TransferStatus::Done => Style::default().fg(Th::ok()),
+                    ssh_core::TransferStatus::Running => Style::default().fg(Th::warn()),
                     _ => Style::default(),
                 }
             };
@@ -723,12 +729,12 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
                 );
                 lines.push(Line::from(Span::styled(
                     detail,
-                    Style::default().fg(Th::FG_DIM),
+                    Style::default().fg(Th::fg_dim()),
                 )));
                 if let Some(err) = &job.error {
                     lines.push(Line::from(Span::styled(
                         format!("  {err}"),
-                        Style::default().fg(Th::ERR),
+                        Style::default().fg(Th::err()),
                     )));
                 }
             }
@@ -737,7 +743,7 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
     if focused {
         lines.push(Line::from(Span::styled(
             "c cancel · r retry · u/d queue",
-            Style::default().fg(Th::FG_DIM),
+            Style::default().fg(Th::fg_dim()),
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -770,7 +776,7 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Add host ")
-        .border_style(Style::default().fg(Th::ACCENT));
+        .border_style(Style::default().fg(Th::accent()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -807,8 +813,8 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
         let label = format!("{:<10} {}", format!("{}:", field.label()), value);
         let style = if focused {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -819,13 +825,13 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Th::ERR),
+            Style::default().fg(Th::err()),
         )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Tab next · Ctrl+S save · Esc cancel",
-        Style::default().fg(Th::FG_DIM),
+        Style::default().fg(Th::fg_dim()),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -848,9 +854,9 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
         .borders(Borders::ALL)
         .title(format!(" Unlock vault · {} ", prompt.host_name))
         .border_style(Style::default().fg(if prompt.connecting {
-            Th::ACCENT
+            Th::accent()
         } else {
-            Th::WARN
+            Th::warn()
         }));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -861,12 +867,14 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {spin}  connecting to {}…", prompt.host_name),
-                Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Th::accent())
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "  unlocking vault · opening SSH · please wait",
-                Style::default().fg(Th::FG_MUTED),
+                Style::default().fg(Th::fg_muted()),
             )),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
@@ -879,20 +887,20 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
         Line::from(Span::styled(
             format!("> {masked}"),
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::WARN)
+                .fg(Th::on_accent())
+                .bg(Th::warn())
                 .add_modifier(Modifier::BOLD),
         )),
     ];
     if let Some(err) = &prompt.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Th::ERR),
+            Style::default().fg(Th::err()),
         )));
     }
     lines.push(Line::from(Span::styled(
         "Enter connect · Esc cancel",
-        Style::default().fg(Th::FG_DIM),
+        Style::default().fg(Th::fg_dim()),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -913,7 +921,7 @@ fn draw_connecting_overlay(frame: &mut Frame<'_>, area: Rect, host: &str, spinne
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Connecting ")
-        .border_style(Style::default().fg(Th::ACCENT));
+        .border_style(Style::default().fg(Th::accent()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -922,12 +930,14 @@ fn draw_connecting_overlay(frame: &mut Frame<'_>, area: Rect, host: &str, spinne
         Line::from(""),
         Line::from(Span::styled(
             format!("  {spin}  connecting to {host}…"),
-            Style::default().fg(Th::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Th::accent())
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "  negotiating SSH · please wait",
-            Style::default().fg(Th::FG_MUTED),
+            Style::default().fg(Th::fg_muted()),
         )),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
@@ -954,7 +964,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", prompt.title))
-        .border_style(Style::default().fg(Th::ACCENT));
+        .border_style(Style::default().fg(Th::accent()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -983,9 +993,9 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
             Line::from(Span::styled(
                 format!("> {}", prompt.buffer),
                 if prompt.editing {
-                    Style::default().fg(Th::ON_ACCENT).bg(Th::ACCENT)
+                    Style::default().fg(Th::on_accent()).bg(Th::accent())
                 } else {
-                    Style::default().fg(Th::FG)
+                    Style::default().fg(Th::fg())
                 },
             )),
         ]),
@@ -994,12 +1004,12 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
 
     let mut lines = vec![Line::from(Span::styled(
         format!("local: {}", prompt.browse_cwd.display()),
-        Style::default().fg(Th::WARN),
+        Style::default().fg(Th::warn()),
     ))];
     if let Some(err) = &prompt.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Th::ERR),
+            Style::default().fg(Th::err()),
         )));
     }
     let visible = chunks[1].height.saturating_sub(1) as usize;
@@ -1021,11 +1031,11 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
         let selected = idx == prompt.browse_selected && !prompt.editing;
         let style = if selected {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD)
         } else if entry.is_dir {
-            Style::default().fg(Th::WARN)
+            Style::default().fg(Th::warn())
         } else {
             Style::default()
         };
@@ -1065,7 +1075,7 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" OS file drop ")
-        .border_style(Style::default().fg(Th::WARN));
+        .border_style(Style::default().fg(Th::warn()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -1086,19 +1096,19 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
 
     let upload_style = if offer.selected == 0 {
         Style::default()
-            .fg(Th::ON_ACCENT)
-            .bg(Th::WARN)
+            .fg(Th::on_accent())
+            .bg(Th::warn())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Th::FG_MUTED)
+        Style::default().fg(Th::fg_muted())
     };
     let cancel_style = if offer.selected == 1 {
         Style::default()
-            .fg(Th::ON_ACCENT)
-            .bg(Th::FG_DIM)
+            .fg(Th::on_accent())
+            .bg(Th::fg_dim())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Th::FG_MUTED)
+        Style::default().fg(Th::fg_muted())
     };
     lines.push(Line::from(vec![
         Span::styled(" Upload ", upload_style),
@@ -1107,7 +1117,7 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
     ]));
     lines.push(Line::from(Span::styled(
         "Enter/y confirm · Tab switch · Esc cancel",
-        Style::default().fg(Th::FG_DIM),
+        Style::default().fg(Th::fg_dim()),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1132,7 +1142,7 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
             " Diagnostics · {} entries · F9/Esc close ",
             diag.entries.len()
         ))
-        .border_style(Style::default().fg(Th::ERR));
+        .border_style(Style::default().fg(Th::err()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -1153,14 +1163,14 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
     }
     for entry in slice {
         let color = match entry.level {
-            DiagLevel::Info => Th::FG_MUTED,
-            DiagLevel::Warn => Th::WARN,
-            DiagLevel::Error => Th::ERR,
+            DiagLevel::Info => Th::fg_muted(),
+            DiagLevel::Warn => Th::warn(),
+            DiagLevel::Error => Th::err(),
         };
         // Compact clock: last 5 digits of epoch seconds is enough as relative marker.
         let clock = entry.ts_secs % 100_000;
         lines.push(Line::from(vec![
-            Span::styled(format!("{clock:05} ",), Style::default().fg(Th::FG_DIM)),
+            Span::styled(format!("{clock:05} ",), Style::default().fg(Th::fg_dim())),
             Span::styled(
                 format!("[{}] ", entry.level.tag()),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1172,7 +1182,7 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
     frame.render_widget(
         Paragraph::new(Span::styled(
             "j/k scroll · PgUp/PgDn · Home/End · c clear",
-            Style::default().fg(Th::FG_DIM),
+            Style::default().fg(Th::fg_dim()),
         )),
         chunks[1],
     );
@@ -1194,14 +1204,14 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", prompt.title))
-        .border_style(Style::default().fg(Th::ERR));
+        .border_style(Style::default().fg(Th::err()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
     let mut lines = vec![
         Line::from(Span::styled(
             "The following file(s) already exist on the target folder. Overwrite?",
-            Style::default().fg(Th::ERR).add_modifier(Modifier::BOLD),
+            Style::default().fg(Th::err()).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -1215,19 +1225,19 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
 
     let yes_style = if prompt.selected == 0 {
         Style::default()
-            .fg(Th::ON_ACCENT)
-            .bg(Th::ERR)
+            .fg(Th::on_accent())
+            .bg(Th::err())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Th::FG_MUTED)
+        Style::default().fg(Th::fg_muted())
     };
     let no_style = if prompt.selected == 1 {
         Style::default()
-            .fg(Th::ON_ACCENT)
-            .bg(Th::FG_DIM)
+            .fg(Th::on_accent())
+            .bg(Th::fg_dim())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Th::FG_MUTED)
+        Style::default().fg(Th::fg_muted())
     };
     lines.push(Line::from(vec![
         Span::styled(" Yes, Overwrite ", yes_style),
@@ -1236,7 +1246,7 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
     ]));
     lines.push(Line::from(Span::styled(
         "Enter confirm · Tab switch · Esc cancel",
-        Style::default().fg(Th::FG_DIM),
+        Style::default().fg(Th::fg_dim()),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1261,8 +1271,8 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
 
     frame.render_widget(Clear, rect);
     let border_fg = match prompt {
-        FilesPrompt::Delete { .. } => Th::ERR,
-        _ => Th::ACCENT,
+        FilesPrompt::Delete { .. } => Th::err(),
+        _ => Th::accent(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1276,39 +1286,39 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
         FilesPrompt::Mkdir { buffer, error } => {
             lines.push(Line::from(Span::styled(
                 "Folder name",
-                Style::default().fg(Th::FG_MUTED),
+                Style::default().fg(Th::fg_muted()),
             )));
             lines.push(Line::from(format!("  {buffer}█")));
             if let Some(err) = error {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     err.clone(),
-                    Style::default().fg(Th::ERR),
+                    Style::default().fg(Th::err()),
                 )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter create · Esc cancel",
-                Style::default().fg(Th::FG_DIM),
+                Style::default().fg(Th::fg_dim()),
             )));
         }
         FilesPrompt::Rename { buffer, error, .. } => {
             lines.push(Line::from(Span::styled(
                 "New name",
-                Style::default().fg(Th::FG_MUTED),
+                Style::default().fg(Th::fg_muted()),
             )));
             lines.push(Line::from(format!("  {buffer}█")));
             if let Some(err) = error {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     err.clone(),
-                    Style::default().fg(Th::ERR),
+                    Style::default().fg(Th::err()),
                 )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter rename · Esc cancel",
-                Style::default().fg(Th::FG_DIM),
+                Style::default().fg(Th::fg_dim()),
             )));
         }
         FilesPrompt::Delete {
@@ -1316,7 +1326,7 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
         } => {
             lines.push(Line::from(Span::styled(
                 "Permanently delete the following?",
-                Style::default().fg(Th::ERR).add_modifier(Modifier::BOLD),
+                Style::default().fg(Th::err()).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
             for (i, name) in names.iter().take(4).enumerate() {
@@ -1329,19 +1339,19 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
 
             let yes_style = if *selected == 0 {
                 Style::default()
-                    .fg(Th::ON_ACCENT)
-                    .bg(Th::ERR)
+                    .fg(Th::on_accent())
+                    .bg(Th::err())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Th::FG_MUTED)
+                Style::default().fg(Th::fg_muted())
             };
             let no_style = if *selected == 1 {
                 Style::default()
-                    .fg(Th::ON_ACCENT)
-                    .bg(Th::FG_DIM)
+                    .fg(Th::on_accent())
+                    .bg(Th::fg_dim())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Th::FG_MUTED)
+                Style::default().fg(Th::fg_muted())
             };
             lines.push(Line::from(vec![
                 Span::styled(" Yes, Delete ", yes_style),
@@ -1350,7 +1360,7 @@ fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
             ]));
             lines.push(Line::from(Span::styled(
                 "Enter confirm · Tab switch · Esc cancel",
-                Style::default().fg(Th::FG_DIM),
+                Style::default().fg(Th::fg_dim()),
             )));
         }
     }
@@ -1400,8 +1410,8 @@ fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&Dr
     frame.render_widget(
         Paragraph::new(text).style(
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::WARN)
+                .fg(Th::on_accent())
+                .bg(Th::warn())
                 .add_modifier(Modifier::BOLD),
         ),
         rect,
@@ -1422,7 +1432,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     if let ViewerKind::Image(preview) = &viewer.kind {
         let mut lines = vec![Line::from(Span::styled(
             format!("{}  {}", viewer.title, preview.meta),
-            Style::default().fg(Th::INFO).add_modifier(Modifier::BOLD),
+            Style::default().fg(Th::info()).add_modifier(Modifier::BOLD),
         ))];
         let max = area.height.saturating_sub(1) as usize;
         let start = (viewer.scroll as usize).min(preview.rows.len().saturating_sub(1));
@@ -1456,7 +1466,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
 
     let mut lines = vec![Line::from(Span::styled(
         header,
-        Style::default().fg(Th::INFO).add_modifier(Modifier::BOLD),
+        Style::default().fg(Th::info()).add_modifier(Modifier::BOLD),
     ))];
     for line in slice {
         lines.push(Line::from(line.to_string()));
@@ -1481,7 +1491,7 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &Editor
     let header = format!("{}{}{}  · Ctrl+S save · Esc", editor.title, dirty, mode);
     let mut lines = vec![Line::from(Span::styled(
         header,
-        Style::default().fg(Th::WARN).add_modifier(Modifier::BOLD),
+        Style::default().fg(Th::warn()).add_modifier(Modifier::BOLD),
     ))];
 
     let max = area.height.saturating_sub(1) as usize;
@@ -1501,8 +1511,8 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &Editor
             spans.push(Span::styled(
                 ch.to_string(),
                 Style::default()
-                    .fg(Th::ON_ACCENT)
-                    .bg(Th::ACCENT)
+                    .fg(Th::on_accent())
+                    .bg(Th::accent())
                     .add_modifier(Modifier::BOLD),
             ));
             if col < chars.len() {
@@ -1525,7 +1535,7 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
     if let Some(err) = &procs.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Th::WARN),
+            Style::default().fg(Th::warn()),
         )));
     }
     if procs.loading {
@@ -1536,7 +1546,9 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
             "{:<7} {:<8} {:>5} {:>5}  COMMAND",
             "PID", "USER", "%CPU", "%MEM"
         ),
-        Style::default().fg(Th::FG_DIM).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Th::fg_dim())
+            .add_modifier(Modifier::BOLD),
     )));
 
     let visible = area.height.saturating_sub(lines.len() as u16) as usize;
@@ -1548,11 +1560,11 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
         );
         let style = if idx == procs.selected && focused {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD)
         } else if idx == procs.selected {
-            Style::default().fg(Th::ACCENT)
+            Style::default().fg(Th::accent())
         } else {
             Style::default()
         };
@@ -1577,16 +1589,16 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
     let dock_hot = matches!(model.drop_target, Some(DropTarget::TransferDock));
     let mut spans = vec![Span::styled(
-        " DOCK ",
+        if model.compact_dock { " · " } else { " DOCK " },
         if dock_hot {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::WARN)
+                .fg(Th::on_accent())
+                .bg(Th::warn())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Th::FG_DIM)
-                .bg(Th::CHROME)
+                .fg(Th::fg_dim())
+                .bg(Th::chrome())
                 .add_modifier(Modifier::BOLD)
         },
     )];
@@ -1595,35 +1607,51 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         let active = model.screen == ScreenKind::Desktop && focused == *app && is_open;
         let style = if active {
             Style::default()
-                .fg(Th::ON_ACCENT)
-                .bg(Th::ACCENT)
+                .fg(Th::on_accent())
+                .bg(Th::accent())
                 .add_modifier(Modifier::BOLD)
         } else if is_open {
-            Style::default().fg(Th::FG_MUTED).bg(Th::CHROME)
+            Style::default().fg(Th::fg_muted()).bg(Th::chrome())
         } else {
-            // Closed / available to open
             Style::default()
-                .fg(Th::FG_DIM)
-                .bg(Th::CHROME)
+                .fg(Th::fg_dim())
+                .bg(Th::chrome())
                 .add_modifier(Modifier::DIM)
         };
-        let label = if is_open {
-            format!(" {} ", app.label().to_ascii_uppercase())
+        let name = if model.compact_dock {
+            dock_short_label(*app).to_string()
         } else {
-            format!(" [{}] ", app.label().to_ascii_uppercase())
+            app.label().to_ascii_uppercase()
+        };
+        let label = if is_open {
+            format!(" {name} ")
+        } else {
+            format!(" [{name}] ")
         };
         spans.push(Span::styled(label, style));
     }
     if model.clipboard_has_files {
         spans.push(Span::styled(
             format!(" [clipboard:{}] ", model.clipboard_label),
-            Style::default().fg(Th::INFO).bg(Th::CHROME),
+            Style::default().fg(Th::info()).bg(Th::chrome()),
         ));
     }
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::CHROME)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::chrome())),
         area,
     );
+}
+
+fn dock_short_label(app: AppKind) -> &'static str {
+    match app {
+        AppKind::Terminal => "Sh",
+        AppKind::Files => "Fi",
+        AppKind::Viewer => "Vw",
+        AppKind::Editor => "Ed",
+        AppKind::Transfers => "Xfer",
+        AppKind::Processes => "Ps",
+        AppKind::Launcher => "Hosts",
+    }
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
@@ -1635,12 +1663,12 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         ScreenKind::Desktop => "Ctrl+N hosts · Ctrl+Tab session · F8 picker · Ctrl+Q quit",
     };
     let line = Line::from(vec![
-        Span::styled(format!(" {} ", model.status), Style::default().fg(Th::FG)),
-        Span::styled("│ ", Style::default().fg(Th::FG_DIM)),
-        Span::styled(help, Style::default().fg(Th::FG_DIM)),
+        Span::styled(format!(" {} ", model.status), Style::default().fg(Th::fg())),
+        Span::styled("│ ", Style::default().fg(Th::fg_dim())),
+        Span::styled(help, Style::default().fg(Th::fg_dim())),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Th::CHROME)),
+        Paragraph::new(line).style(Style::default().bg(Th::chrome())),
         area,
     );
 }
