@@ -1630,9 +1630,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             "Enter connect · Esc desktop · F9 log · Ctrl+Q quit"
         }
         ScreenKind::Launcher => "a add · F9 log · Enter connect · Ctrl+Q quit",
-        ScreenKind::Desktop => {
-            "Ctrl+N hosts · Ctrl+Tab session · F8 picker · Ctrl+Q quit"
-        }
+        ScreenKind::Desktop => "Ctrl+N hosts · Ctrl+Tab session · F8 picker · Ctrl+Q quit",
     };
     let line = Line::from(vec![
         Span::styled(format!(" {} ", model.status), Style::default().fg(Th::FG)),

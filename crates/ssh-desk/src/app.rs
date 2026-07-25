@@ -261,11 +261,7 @@ impl App {
             return Ok(());
         };
         // Already connected → switch to that tab instead of reconnecting.
-        if let Some(pos) = self
-            .sessions
-            .iter()
-            .position(|s| s.host_id == profile.id)
-        {
+        if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
             self.active_idx = pos;
             self.screen = Screen::Desktop;
             self.status = format!(
@@ -683,9 +679,7 @@ impl App {
         self.status = if n == 0 {
             "launcher · select a host and press Enter".into()
         } else {
-            format!(
-                "launcher · {n} session(s) still open · Enter connect · Esc back to desktop"
-            )
+            format!("launcher · {n} session(s) still open · Enter connect · Esc back to desktop")
         };
     }
 
