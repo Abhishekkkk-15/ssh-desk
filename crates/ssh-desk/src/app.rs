@@ -227,57 +227,42 @@ impl App {
 
         let hub = Arc::clone(&self.hub);
         let vault = self.vault.clone();
-        let online;
         let p_pass = password_passphrase.as_deref();
         match hub
             .connect(profile.clone(), &vault, p_pass)
             .await
         {
             Ok(_pty_id) => {
-                online = true;
                 self.status = format!("connected · {}", profile.name);
             }
             Err(e) => {
-                online = false;
-                self.status = format!("offline desktop · {e}");
+                self.connect_in_flight = false;
+                self.vault_unlock = None;
+                self.status = format!("connection failed · {e}");
+                return Ok(());
             }
         }
         
         self.vault_unlock = None; // clear unlock prompt now that connection completed
+        let online = true;
 
         // Find or create a slot for this host.
         let slot_idx = if let Some(pos) = self.sessions.iter().position(|s| s.host_id == profile.id) {
             // Reconnect: reset state.
             let slot = &mut self.sessions[pos];
             slot.cached_passphrase = password_passphrase;
-            slot.files = if online { FilesState::default() } else { FilesState::demo() };
+            slot.files = FilesState::default();
             slot.viewer.clear();
             slot.editor.clear();
-            slot.processes = if online { ProcessesState::default() } else { ProcessesState::demo() };
-            slot.demo_term = if online {
-                format!("Connected to '{}'.\nReady.\n", profile.name)
-            } else {
-                format!("Reconnect failed. Offline/demo mode.\n")
-            };
+            slot.processes = ProcessesState::default();
+            slot.demo_term = format!("Connected to '{}'.\nReady.\n", profile.name);
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
             pos
         } else {
             let mut slot = SessionSlot::new(profile.id.clone(), profile.name.clone(), online);
             slot.cached_passphrase = password_passphrase;
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
-            if online {
-                slot.demo_term = format!(
-                    "Connected to '{}'.\nReady.\n",
-                    profile.name
-                );
-            } else {
-                slot.demo_term = format!(
-                    "Connection failed.\n\
-                     Desktop for '{}' running in offline/demo mode.\n\
-                     Fix auth and reconnect from launcher (Esc).\n",
-                    profile.name
-                );
-            }
+            slot.demo_term = format!("Connected to '{}'.\nReady.\n", profile.name);
             self.sessions.push(slot);
             self.sessions.len() - 1
         };
