@@ -533,10 +533,11 @@ impl App {
                 }
                 SessionEvent::PtyData(out) => {
                     if let Ok(txt) = std::str::from_utf8(&out.data) {
-                        // Push PTY data to the slot whose pty session matches.
-                        // We route by active slot for now (single PTY per session).
+                        // Strip ANSI control/escape sequence codes (like cursor positioning '16;21H')
+                        // so they don't corrupt the terminal display layout.
+                        let cleaned = strip_ansi_escapes(txt);
                         if let Some(slot) = self.slot_mut() {
-                            slot.demo_term.push_str(txt);
+                            slot.demo_term.push_str(&cleaned);
                             if slot.demo_term.len() > 200_000 {
                                 let keep = slot.demo_term.len() - 200_000;
                                 slot.demo_term.drain(..keep);
@@ -2125,4 +2126,26 @@ fn restore_terminal(terminal: &mut DefaultTerminal) -> Result<()> {
     terminal.show_cursor()?;
     let _ = io::stdout().flush();
     Ok(())
+}
+
+fn strip_ansi_escapes(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                let _ = chars.next(); // consume '['
+                // Consume arguments up to letter code
+                while let Some(&c2) = chars.peek() {
+                    let _ = chars.next();
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

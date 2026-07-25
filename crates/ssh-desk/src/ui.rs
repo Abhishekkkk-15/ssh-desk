@@ -173,7 +173,8 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black)),
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Black)),
         area,
     );
 }
