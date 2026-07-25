@@ -2006,7 +2006,7 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         }
         KeyCode::Char(c) => c.to_string().into_bytes(),
         KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x08],
+        KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => b"\x1b[A".to_vec(),
@@ -2143,6 +2143,8 @@ fn strip_ansi_escapes(s: &str) -> String {
                     }
                 }
             }
+        } else if c == '\x08' {
+            result.pop(); // Perform the backspace deletion locally on the text buffer
         } else {
             result.push(c);
         }
