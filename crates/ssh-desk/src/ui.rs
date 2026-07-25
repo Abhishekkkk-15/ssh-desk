@@ -354,6 +354,7 @@ fn draw_pane(
                 .title(title)
                 .border_style(border);
             let inner = block.inner(area);
+            frame.render_widget(Clear, area); // Wipe outer block area completely first
             frame.render_widget(block, area);
             draw_app_body(frame, inner, *app, focused, model);
         }
