@@ -88,25 +88,57 @@ fn contains(r: Rect, x: u16, y: u16) -> bool {
 }
 
 /// Mirror the desktop draw layout so mouse coords map to panes/rows.
-pub fn compute_frame_geo(term: Rect, desktop: &Desktop, files: &FilesState) -> FrameGeo {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(term);
+pub fn compute_frame_geo(
+    term: Rect,
+    desktop: &Desktop,
+    files: &FilesState,
+    fullscreen_app: Option<AppKind>,
+    chrome_hidden: bool,
+) -> FrameGeo {
+    let (content, dock) = if chrome_hidden {
+        (term, Rect::default())
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(term);
+        (chunks[1], chunks[2])
+    };
 
     let mut geo = FrameGeo {
-        dock: chunks[2],
-        content: chunks[1],
+        dock,
+        content,
         ..FrameGeo::default()
     };
 
+    // F11 pane fullscreen uses the whole content area (draw_desktop does the same).
+    if let Some(app) = fullscreen_app {
+        let block_inner = inset_border(content);
+        let inner = inset_header_strip(block_inner);
+        geo.panes.push(PaneHit {
+            id: desktop.tree.focused(),
+            app,
+            area: content,
+            inner,
+        });
+        match app {
+            AppKind::Files => {
+                geo.files_pane_inner = Some(inner);
+                geo.files_rows = files_row_hits(inner, files);
+            }
+            AppKind::Transfers => geo.transfers_pane = Some(inner),
+            _ => {}
+        }
+        return geo;
+    }
+
     collect_panes(
-        chunks[1],
+        content,
         desktop.tree.root_node(),
         &mut geo.panes,
         &mut geo.files_pane_inner,

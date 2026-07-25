@@ -1432,20 +1432,40 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     }
 
     if let ViewerKind::Image(preview) = &viewer.kind {
-        let mut lines = vec![Line::from(Span::styled(
-            format!("{}  {}", viewer.title, preview.meta),
-            Style::default().fg(Th::info()).add_modifier(Modifier::BOLD),
-        ))];
-        let max = area.height.saturating_sub(1) as usize;
         let max_cols = area.width as usize;
+        let max_rows = area.height as usize;
+        // Letterbox: center the raster in the pane when aspect leaves free space.
+        let img_rows = preview.rows.len().min(max_rows);
+        let top_pad = max_rows.saturating_sub(img_rows) / 2;
+        let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
+        for _ in 0..top_pad {
+            lines.push(Line::from(""));
+        }
         let start = (viewer.scroll as usize).min(preview.rows.len().saturating_sub(1));
-        for row in preview.rows.iter().skip(start).take(max) {
+        for row in preview
+            .rows
+            .iter()
+            .skip(start)
+            .take(max_rows.saturating_sub(top_pad))
+        {
             let spans: Vec<Span> = row
                 .iter()
                 .take(max_cols)
                 .map(|cell| Span::styled("▀", Style::default().fg(cell.fg).bg(cell.bg)))
                 .collect();
-            lines.push(Line::from(spans));
+            // Center horizontally when the raster is narrower than the pane.
+            let row_cols = spans.len();
+            if row_cols < max_cols {
+                let left = (max_cols - row_cols) / 2;
+                let mut centered = Vec::with_capacity(max_cols);
+                if left > 0 {
+                    centered.push(Span::raw(" ".repeat(left)));
+                }
+                centered.extend(spans);
+                lines.push(Line::from(centered));
+            } else {
+                lines.push(Line::from(spans));
+            }
         }
         frame.render_widget(Paragraph::new(lines), area);
         return;

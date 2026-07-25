@@ -767,35 +767,43 @@ impl App {
     fn viewer_preview_budget(&self) -> (u16, u16) {
         if let Some(geo) = &self.last_geo {
             if let Some(pane) = geo.panes.iter().find(|p| p.app == AppKind::Viewer) {
-                return (
-                    pane.inner.width.max(16),
-                    pane.inner.height.saturating_sub(1).max(6),
-                );
+                // No extra meta line in the image body — use the full pane inner.
+                return (pane.inner.width.max(16), pane.inner.height.max(6));
             }
-            // Viewer just opened — last_geo is stale; estimate half the content area.
+            // Viewer just opened — last_geo may predate the split; use content area.
             return (
-                (geo.content.width / 2).max(24),
-                geo.content.height.saturating_sub(1).max(8),
+                geo.content.width.saturating_sub(2).max(24),
+                geo.content.height.saturating_sub(2).max(8),
             );
         }
-        (60, 20)
+        (80, 30)
     }
 
     /// Re-rasterize image preview when the Viewer pane size changes.
     fn refit_image_preview_if_needed(&mut self) {
-        let Some(geo) = self.last_geo.as_ref() else {
-            return;
-        };
-        let Some(pane) = geo.panes.iter().find(|p| p.app == AppKind::Viewer) else {
-            return;
-        };
-        let cols = pane.inner.width.max(16);
-        let rows = pane.inner.height.saturating_sub(1).max(6);
+        let (cols, rows) = self.viewer_preview_budget();
         let bg = crate::theme::Theme::bg_rgb();
         if let Some(s) = self.slot_mut() {
             if s.viewer.image_bytes.is_some() {
                 let _ = s.viewer.refit_image(cols, rows, bg);
             }
+        }
+    }
+
+    /// Build layout geometry for the current frame (matches `ui::draw`).
+    fn recompute_geo(&mut self, term: ratatui::layout::Rect) {
+        let fullscreen_app = self.slot().and_then(|s| s.fullscreen_app);
+        let chrome_hidden = self.full_screen;
+        if let (Some(desktop), Some(files)) = (self.desktop(), self.slot().map(|s| &s.files)) {
+            self.last_geo = Some(hit::compute_frame_geo(
+                term,
+                desktop,
+                files,
+                fullscreen_app,
+                chrome_hidden,
+            ));
+        } else {
+            self.last_geo = None;
         }
     }
 
@@ -947,6 +955,15 @@ impl App {
                 if let Some(s) = self.slot_mut() {
                     s.desktop.tree.focus_or_open_viewer();
                 }
+                // Refresh geometry now that Viewer exists in the tree.
+                if let Ok(s) = crossterm::terminal::size() {
+                    self.recompute_geo(ratatui::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        width: s.0,
+                        height: s.1,
+                    });
+                }
             }
             let is_image = matches!(action, OpenAction::PreviewImage);
             let read_result = if is_image {
@@ -974,14 +991,14 @@ impl App {
                     }
                     let (cols, rows) = self.viewer_preview_budget();
                     let bg = crate::theme::Theme::bg_rgb();
-                    let title = if let Some(s) = self.slot_mut() {
+                    let status = if let Some(s) = self.slot_mut() {
                         s.viewer = ViewerState::from_content_on(content, cols, rows, bg);
                         s.desktop.tree.focus_or_open_viewer();
-                        s.viewer.title.clone()
+                        format!("viewer · {} · {}", s.viewer.title, s.viewer.body)
                     } else {
-                        String::new()
+                        "viewer".into()
                     };
-                    self.status = format!("viewer · {}", title);
+                    self.status = status;
                 }
                 Err(e) => self.note_status(
                     DiagLevel::Error,
@@ -3614,11 +3631,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
             width: s.width,
             height: s.height,
         })?;
-        if let (Some(desktop), Some(files)) = (app.desktop(), app.slot().map(|s| &s.files)) {
-            app.last_geo = Some(hit::compute_frame_geo(area, desktop, files));
-        } else {
-            app.last_geo = None;
-        }
+        app.recompute_geo(area);
         app.refit_image_preview_if_needed();
 
         // Keep local VT emulator + remote PTY sized to the Terminal pane.
