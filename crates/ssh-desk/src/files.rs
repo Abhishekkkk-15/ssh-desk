@@ -190,6 +190,8 @@ pub struct ViewerState {
     pub binary: bool,
     pub truncated: bool,
     pub kind: ViewerKind,
+    /// Raw bytes kept so image previews can re-rasterize on resize.
+    pub image_bytes: Option<Vec<u8>>,
 }
 
 impl ViewerState {
@@ -201,7 +203,12 @@ impl ViewerState {
         self.path.is_some()
     }
 
-    pub fn from_content(content: RemoteFileContent, preview_cols: u16, preview_rows: u16) -> Self {
+    pub fn from_content_on(
+        content: RemoteFileContent,
+        preview_cols: u16,
+        preview_rows: u16,
+        bg_rgb: [u8; 3],
+    ) -> Self {
         let path = content.path.clone();
         let title = path
             .file_name()
@@ -211,28 +218,48 @@ impl ViewerState {
         let action = sniff_open_action(&path);
 
         if matches!(action, OpenAction::PreviewImage) {
-            match HalfblockPreview::from_bytes(&content.bytes, preview_cols, preview_rows) {
+            match HalfblockPreview::from_bytes_on(
+                &content.bytes,
+                preview_cols,
+                preview_rows,
+                bg_rgb,
+            ) {
                 Ok(preview) => {
                     let meta = preview.meta.clone();
+                    let trunc_note = if truncated {
+                        "  [truncated — preview may look wrong]"
+                    } else {
+                        ""
+                    };
                     return Self {
                         path: Some(path),
                         title,
-                        body: meta,
+                        body: format!("{meta}{trunc_note}"),
                         scroll: 0,
                         binary: false,
                         truncated,
                         kind: ViewerKind::Image(preview),
+                        image_bytes: Some(content.bytes),
                     };
                 }
                 Err(e) => {
                     return Self {
                         path: Some(path),
                         title,
-                        body: format!("image decode failed: {e}\n\n{}", content.hex_preview(2048)),
+                        body: format!(
+                            "image decode failed: {e}{}\n\n{}",
+                            if truncated {
+                                " (file truncated on download)"
+                            } else {
+                                ""
+                            },
+                            content.hex_preview(2048)
+                        ),
                         scroll: 0,
                         binary: true,
                         truncated,
                         kind: ViewerKind::Hex,
+                        image_bytes: None,
                     };
                 }
             }
@@ -253,7 +280,7 @@ impl ViewerState {
         };
 
         if truncated {
-            body.push_str("\n\n… truncated at 512 KiB …\n");
+            body.push_str("\n\n… truncated at download limit …\n");
         }
 
         Self {
@@ -264,7 +291,33 @@ impl ViewerState {
             binary,
             truncated,
             kind,
+            image_bytes: None,
         }
+    }
+
+    /// Re-rasterize a stored image to a new Viewer pane size.
+    pub fn refit_image(&mut self, cols: u16, rows: u16, bg_rgb: [u8; 3]) -> bool {
+        let Some(bytes) = self.image_bytes.as_ref() else {
+            return false;
+        };
+        let Ok(preview) = HalfblockPreview::from_bytes_on(bytes, cols, rows, bg_rgb) else {
+            return false;
+        };
+        if let ViewerKind::Image(old) = &self.kind {
+            if old.width == preview.width && old.height == preview.height {
+                return false;
+            }
+        }
+        let meta = preview.meta.clone();
+        let trunc_note = if self.truncated {
+            "  [truncated — preview may look wrong]"
+        } else {
+            ""
+        };
+        self.body = format!("{meta}{trunc_note}");
+        self.kind = ViewerKind::Image(preview);
+        self.scroll = 0;
+        true
     }
 
     pub fn demo_file(path: &Path) -> Self {
@@ -291,6 +344,7 @@ impl ViewerState {
             binary: false,
             truncated: false,
             kind: ViewerKind::Text,
+            image_bytes: None,
         }
     }
 

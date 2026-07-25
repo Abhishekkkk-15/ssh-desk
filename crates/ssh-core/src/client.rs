@@ -432,6 +432,41 @@ impl SessionHub {
         })
     }
 
+    /// Read a remote file with an explicit size cap (e.g. larger for image preview).
+    pub async fn read_file_max(
+        &self,
+        host_id: &str,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<RemoteFileContent, CoreError> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .iter()
+            .find(|s| s.host_id == host_id)
+            .ok_or(CoreError::Closed)?;
+        let sftp = session
+            .sftp
+            .as_ref()
+            .ok_or_else(|| CoreError::Sftp("sftp not available".into()))?;
+
+        let path_str = remote_path_string(path);
+        let mut bytes = sftp
+            .read(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+
+        let truncated = bytes.len() > max_bytes;
+        if truncated {
+            bytes.truncate(max_bytes);
+        }
+
+        Ok(RemoteFileContent {
+            path: path.to_path_buf(),
+            bytes,
+            truncated,
+        })
+    }
+
     /// Write (create/truncate) a remote file over SFTP.
     pub async fn write_file(
         &self,

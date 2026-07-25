@@ -1437,10 +1437,12 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
             Style::default().fg(Th::info()).add_modifier(Modifier::BOLD),
         ))];
         let max = area.height.saturating_sub(1) as usize;
+        let max_cols = area.width as usize;
         let start = (viewer.scroll as usize).min(preview.rows.len().saturating_sub(1));
         for row in preview.rows.iter().skip(start).take(max) {
             let spans: Vec<Span> = row
                 .iter()
+                .take(max_cols)
                 .map(|cell| Span::styled("▀", Style::default().fg(cell.fg).bg(cell.bg)))
                 .collect();
             lines.push(Line::from(spans));

@@ -172,4 +172,13 @@ impl Theme {
             Color::Rgb(0x5b, 0x4d, 0xb8)
         }
     }
+
+    /// Background RGB for compositing transparent image pixels.
+    pub fn bg_rgb() -> [u8; 3] {
+        if Self::dark() {
+            [0x1a, 0x1b, 0x26]
+        } else {
+            [0xee, 0xf1, 0xf6]
+        }
+    }
 }

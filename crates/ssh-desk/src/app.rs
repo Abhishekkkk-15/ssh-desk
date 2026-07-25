@@ -268,6 +268,18 @@ impl App {
         let next = theme::current_theme().toggle();
         theme::set_theme(next);
         self.persist_ui_prefs();
+        // Recomposite transparent pixels onto the new background.
+        if let Some(s) = self.slot_mut() {
+            if s.viewer.image_bytes.is_some() {
+                let (cols, rows) = match &s.viewer.kind {
+                    crate::files::ViewerKind::Image(p) => (p.width.max(16), p.height.max(6)),
+                    _ => (60, 20),
+                };
+                let _ = s
+                    .viewer
+                    .refit_image(cols, rows, crate::theme::Theme::bg_rgb());
+            }
+        }
         self.status = format!("theme · {} · Ctrl+T to toggle", next.as_str());
     }
 
@@ -751,6 +763,42 @@ impl App {
         };
     }
 
+    /// Cell budget for half-block image rasterization (Viewer pane, not Files).
+    fn viewer_preview_budget(&self) -> (u16, u16) {
+        if let Some(geo) = &self.last_geo {
+            if let Some(pane) = geo.panes.iter().find(|p| p.app == AppKind::Viewer) {
+                return (
+                    pane.inner.width.max(16),
+                    pane.inner.height.saturating_sub(1).max(6),
+                );
+            }
+            // Viewer just opened — last_geo is stale; estimate half the content area.
+            return (
+                (geo.content.width / 2).max(24),
+                geo.content.height.saturating_sub(1).max(8),
+            );
+        }
+        (60, 20)
+    }
+
+    /// Re-rasterize image preview when the Viewer pane size changes.
+    fn refit_image_preview_if_needed(&mut self) {
+        let Some(geo) = self.last_geo.as_ref() else {
+            return;
+        };
+        let Some(pane) = geo.panes.iter().find(|p| p.app == AppKind::Viewer) else {
+            return;
+        };
+        let cols = pane.inner.width.max(16);
+        let rows = pane.inner.height.saturating_sub(1).max(6);
+        let bg = crate::theme::Theme::bg_rgb();
+        if let Some(s) = self.slot_mut() {
+            if s.viewer.image_bytes.is_some() {
+                let _ = s.viewer.refit_image(cols, rows, bg);
+            }
+        }
+    }
+
     /// Return to the active desktop session from the launcher (sessions stay open).
     fn resume_desktop(&mut self) -> bool {
         if self.sessions.is_empty() {
@@ -894,7 +942,22 @@ impl App {
                 Some(id) => id.to_owned(),
                 None => return Ok(()),
             };
-            match self.hub.read_file(&host_id, &path).await {
+            // Open Viewer first so we size the half-block raster to that pane (not Files).
+            if !into_editor {
+                if let Some(s) = self.slot_mut() {
+                    s.desktop.tree.focus_or_open_viewer();
+                }
+            }
+            let is_image = matches!(action, OpenAction::PreviewImage);
+            let read_result = if is_image {
+                // Photos often exceed the default 512 KiB text/hex cap.
+                self.hub
+                    .read_file_max(&host_id, &path, 4 * 1024 * 1024)
+                    .await
+            } else {
+                self.hub.read_file(&host_id, &path).await
+            };
+            match read_result {
                 Ok(content) => {
                     if into_editor && !content.looks_binary() {
                         if let Some(text) = content.as_text() {
@@ -909,19 +972,10 @@ impl App {
                             return Ok(());
                         }
                     }
-                    let (cols, rows) = self
-                        .last_geo
-                        .as_ref()
-                        .and_then(|g| g.files_pane_inner)
-                        .map(|r| {
-                            (
-                                r.width.saturating_sub(2).max(20),
-                                r.height.saturating_sub(2).max(8),
-                            )
-                        })
-                        .unwrap_or((60, 20));
+                    let (cols, rows) = self.viewer_preview_budget();
+                    let bg = crate::theme::Theme::bg_rgb();
                     let title = if let Some(s) = self.slot_mut() {
-                        s.viewer = ViewerState::from_content(content, cols, rows);
+                        s.viewer = ViewerState::from_content_on(content, cols, rows, bg);
                         s.desktop.tree.focus_or_open_viewer();
                         s.viewer.title.clone()
                     } else {
@@ -3565,6 +3619,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
         } else {
             app.last_geo = None;
         }
+        app.refit_image_preview_if_needed();
 
         // Keep local VT emulator + remote PTY sized to the Terminal pane.
         let term_size = app.last_geo.as_ref().and_then(|geo| {
