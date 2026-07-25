@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use vt100::{Color as VtColor, Parser, Screen};
+use vt100::{Color as VtColor, Parser};
 
 /// Scrollback-backed VT100 emulator fed by remote PTY bytes.
 pub struct TermEmulator {
@@ -58,10 +58,6 @@ impl TermEmulator {
 
     pub fn size(&self) -> (u16, u16) {
         (self.rows, self.cols)
-    }
-
-    pub fn screen(&self) -> &Screen {
-        self.parser.screen()
     }
 
     /// Render visible screen into ratatui lines (one Line per row).

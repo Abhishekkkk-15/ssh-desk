@@ -1364,7 +1364,7 @@ async fn run_upload_tree(
 
 async fn run_download_tree(
     sftp: Arc<SftpSession>,
-    remote_root: PathBuf,
+    _remote_root: PathBuf,
     local_root: PathBuf,
     files: Vec<(PathBuf, PathBuf, u64)>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
