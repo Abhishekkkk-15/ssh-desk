@@ -29,6 +29,7 @@ use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
 use crate::hit::{self, FrameGeo};
 use crate::hostform::{HostForm, VaultUnlockPrompt};
+use crate::term::TermEmulator;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::ui::{self, UiFrame};
 use ssh_os::OpenAction;
@@ -50,7 +51,7 @@ struct SessionSlot {
     editor: EditorState,
     processes: ProcessesState,
     transfers: TransfersUi,
-    demo_term: String,
+    term: TermEmulator,
     pending_files_refresh: bool,
     fullscreen_app: Option<AppKind>,
     cached_passphrase: Option<String>,
@@ -58,14 +59,13 @@ struct SessionSlot {
 
 impl SessionSlot {
     fn new(host_id: String, host_name: String, online: bool) -> Self {
-        let demo_term = if online {
-            String::new()
-        } else {
-            format!(
-                "Desktop for '{host_name}' running in offline/demo mode.\n\
+        let mut term = TermEmulator::new(24, 80);
+        if !online {
+            term.write_str(&format!(
+                "Desktop for '{host_name}' — not connected.\n\
                  Fix auth and reconnect (Esc → launcher → Enter).\n"
-            )
-        };
+            ));
+        }
         SessionSlot {
             host_id,
             host_name,
@@ -83,7 +83,7 @@ impl SessionSlot {
                 ProcessesState::demo()
             },
             transfers: TransfersUi::default(),
-            demo_term,
+            term,
             pending_files_refresh: false,
             fullscreen_app: None,
             cached_passphrase: None,
@@ -278,14 +278,15 @@ impl App {
             slot.viewer.clear();
             slot.editor.clear();
             slot.processes = ProcessesState::default();
-            slot.demo_term = format!("Connected to '{}'.\nReady.\n", profile.name);
+            slot.term = TermEmulator::new(24, 80);
+            slot.term.write_str(&format!("Connected to '{}'.\r\n", profile.name));
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
             pos
         } else {
             let mut slot = SessionSlot::new(profile.id.clone(), profile.name.clone(), online);
             slot.cached_passphrase = password_passphrase;
             slot.desktop = Desktop::new(profile.id.clone(), profile.name.clone());
-            slot.demo_term = format!("Connected to '{}'.\nReady.\n", profile.name);
+            slot.term.write_str(&format!("Connected to '{}'.\r\n", profile.name));
             self.sessions.push(slot);
             self.sessions.len() - 1
         };
@@ -594,40 +595,9 @@ impl App {
                     }
                 }
                 SessionEvent::PtyData(out) => {
-                    if let Ok(txt) = std::str::from_utf8(&out.data) {
-                        if let Some(slot) = self.slot_mut() {
-                            let mut chars = txt.chars().peekable();
-                            while let Some(c) = chars.next() {
-                                if c == '\x1b' {
-                                    if chars.peek() == Some(&'[') {
-                                        let _ = chars.next(); // consume '['
-                                        // Consume arguments up to letter code
-                                        while let Some(&c2) = chars.peek() {
-                                            let _ = chars.next();
-                                            if c2.is_ascii_alphabetic() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                } else if c == '\x08' {
-                                    slot.demo_term.pop();
-                                    if chars.peek() == Some(&' ') {
-                                        let _ = chars.next();
-                                        if chars.peek() == Some(&'\x08') {
-                                            let _ = chars.next();
-                                        }
-                                    }
-                                } else if c == '\x7f' {
-                                    slot.demo_term.pop();
-                                } else {
-                                    slot.demo_term.push(c);
-                                }
-                            }
-                            if slot.demo_term.len() > 200_000 {
-                                let keep = slot.demo_term.len() - 200_000;
-                                slot.demo_term.drain(..keep);
-                            }
-                        }
+                    // Feed raw PTY bytes into the VT100 emulator (active session).
+                    if let Some(slot) = self.slot_mut() {
+                        slot.term.process(&out.data);
                     }
                 }
                 SessionEvent::TransferUpdate(job) => {
@@ -744,7 +714,9 @@ impl App {
                                 return Ok(());
                             }
                         }
-                        if let Some(s) = self.slot_mut() { s.demo_term.push_str(&text); }
+                        if let Some(s) = self.slot_mut() {
+                            s.term.write_str(&text);
+                        }
                         return Ok(());
                     }
                 }
@@ -760,7 +732,10 @@ impl App {
             // Still park paths on the file clipboard for later paste.
             let entries: Vec<FileEntry> = paths
                 .into_iter()
-                .map(|p| FileEntry::local(p, false))
+                .map(|p| {
+                    let is_dir = p.is_dir();
+                    FileEntry::local(p, is_dir)
+                })
                 .collect();
             let n = entries.len();
             self.clipboard.set_files(entries, FileOp::Copy);
@@ -1276,10 +1251,20 @@ impl App {
                     }
                 }
                 match key.code {
-                    KeyCode::Char(c) => { if let Some(s) = self.slot_mut() { s.demo_term.push(c); } }
-                    KeyCode::Enter => { if let Some(s) = self.slot_mut() { s.demo_term.push('\n'); } }
+                    KeyCode::Char(c) => {
+                        if let Some(s) = self.slot_mut() {
+                            s.term.write_str(&c.to_string());
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(s) = self.slot_mut() {
+                            s.term.write_str("\r\n");
+                        }
+                    }
                     KeyCode::Backspace => {
-                        if let Some(s) = self.slot_mut() { s.demo_term.pop(); }
+                        if let Some(s) = self.slot_mut() {
+                            s.term.process(&[0x08, b' ', 0x08]);
+                        }
                     }
                     _ => {}
                 }
@@ -1510,7 +1495,7 @@ impl App {
                         }
                     }
                 }
-                (FileLocation::Remote { host_id: src, path }, FileOp::Copy, false)
+                (FileLocation::Remote { host_id: src, path }, FileOp::Copy, _)
                     if src == &host_id =>
                 {
                     match self
@@ -1525,11 +1510,7 @@ impl App {
                         }
                     }
                 }
-                (FileLocation::Remote { .. }, FileOp::Copy, true) => {
-                    skipped += 1;
-                    errors.push("directory copy not supported yet (files only)".into());
-                }
-                (FileLocation::Local { path }, FileOp::Copy | FileOp::Cut, false) => {
+                (FileLocation::Local { path }, FileOp::Copy | FileOp::Cut, _) => {
                     let cut = op == FileOp::Cut;
                     match self
                         .hub
@@ -1542,10 +1523,6 @@ impl App {
                             skipped += 1;
                         }
                     }
-                }
-                (FileLocation::Local { .. }, _, true) => {
-                    skipped += 1;
-                    errors.push("directory upload via clipboard not supported yet".into());
                 }
                 (FileLocation::Remote { host_id: src, .. }, _, _) if src != &host_id => {
                     skipped += 1;
@@ -1601,7 +1578,7 @@ impl App {
                 FileLocation::Remote {
                     host_id: src,
                     path,
-                } if src == host_id && !entry.is_dir => {
+                } if src == host_id => {
                     let name = path
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
@@ -1621,7 +1598,7 @@ impl App {
                     self.status = "clipboard already local · nothing to paste to disk".into();
                 }
                 _ => {
-                    self.status = "skip dirs / other hosts for paste-to-local".into();
+                    self.status = "skip other hosts for paste-to-local".into();
                 }
             }
         }
@@ -1666,14 +1643,10 @@ impl App {
             return;
         }
         let Some(row) = row else { return; };
-        let Some((path, is_dir)) = resolve_open_path(&cwd, row, &entries) else { return; };
-        if is_dir {
-            self.status = "select a file to download (dirs later)".into();
-            return;
-        }
+        let Some((path, _is_dir)) = resolve_open_path(&cwd, row, &entries) else { return; };
         let size = entries.iter().find(|e| e.path == path).and_then(|e| e.size);
         self.path_prompt = Some(PathPrompt::download(path, size));
-        self.status = "download · confirm local path and press Enter".into();
+        self.status = "download · confirm local path and press Enter (dirs supported)".into();
     }
 
     async fn handle_path_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1757,12 +1730,13 @@ impl App {
     ) -> Result<()> {
         match kind {
             PathPromptKind::CopyLocal => {
-                if !local.is_file() {
-                    self.status = format!("not a file: {}", local.display());
+                if !(local.is_file() || local.is_dir()) {
+                    self.status = format!("not found: {}", local.display());
                     return Ok(());
                 }
+                let is_dir = local.is_dir();
                 self.clipboard
-                    .set_files(vec![FileEntry::local(local.clone(), false)], FileOp::Copy);
+                    .set_files(vec![FileEntry::local(local.clone(), is_dir)], FileOp::Copy);
                 self.status = format!(
                     "copied local {} · Ctrl+V to upload into remote cwd",
                     local.display()
@@ -2121,7 +2095,7 @@ impl App {
     fn frame_model<'a>(&'a self) -> UiFrame<'a> {
         let slot = self.slot();
         let desktop = slot.map(|s| &s.desktop);
-        let term_buffer = slot.map(|s| s.demo_term.as_str()).unwrap_or("");
+        let term: &TermEmulator = slot.map(|s| &s.term).unwrap_or(empty_term());
         let files: &FilesState = slot.map(|s| &s.files).unwrap_or(empty_files());
         let viewer: &ViewerState = slot.map(|s| &s.viewer).unwrap_or(empty_viewer());
         let editor: &EditorState = slot.map(|s| &s.editor).unwrap_or(empty_editor());
@@ -2146,7 +2120,7 @@ impl App {
             } else {
                 &self.status
             },
-            term_buffer,
+            term,
             clipboard_has_files: self.clipboard.has_files(),
             clipboard_label: match self.clipboard.file_op() {
                 Some(ssh_os::FileOp::Copy) => "copy",
@@ -2176,6 +2150,11 @@ fn empty_files() -> &'static FilesState {
     use std::sync::OnceLock;
     static CELL: OnceLock<FilesState> = OnceLock::new();
     CELL.get_or_init(FilesState::default)
+}
+fn empty_term() -> &'static TermEmulator {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<TermEmulator> = OnceLock::new();
+    CELL.get_or_init(TermEmulator::default)
 }
 fn empty_viewer() -> &'static ViewerState {
     use std::sync::OnceLock;
@@ -2281,6 +2260,31 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()>
             app.last_geo = Some(hit::compute_frame_geo(area, desktop, files));
         } else {
             app.last_geo = None;
+        }
+
+        // Keep local VT emulator + remote PTY sized to the Terminal pane.
+        let term_size = app.last_geo.as_ref().and_then(|geo| {
+            geo.panes
+                .iter()
+                .find(|p| p.app == AppKind::Terminal)
+                .map(|p| (p.inner.width.max(2), p.inner.height.max(1)))
+        });
+        if let Some((cols, rows)) = term_size {
+            let need_resize = app
+                .slot()
+                .map(|s| {
+                    let (er, ec) = s.term.size();
+                    er != rows || ec != cols
+                })
+                .unwrap_or(false);
+            if need_resize {
+                if let Some(slot) = app.slot_mut() {
+                    slot.term.resize(rows, cols);
+                }
+                if let Some(host_id) = app.active_host_id().map(str::to_owned) {
+                    let _ = app.hub.resize_pty(&host_id, cols, rows).await;
+                }
+            }
         }
 
         terminal.draw(|frame| ui::draw(frame, &app.frame_model()))?;

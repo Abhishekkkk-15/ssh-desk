@@ -6,13 +6,15 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Status
 
-Phase **7** complete, plus interactive host management and diagnostics:
+Hardening in progress toward production:
 
-- Launcher: **`a` / `n`** add host (agent · key · password), **`d`** delete
-- Password hosts prompt for the vault passphrase on connect
-- Editor save-back, image preview, process monitor
-- **`F9`** diagnostics log (status bar stays one-line; full history in the overlay)
-- File log: `ssh-desk.log` (developer tracing)
+- **VT100 terminal emulator** (colors, cursor, resize) via `vt100`
+- **known_hosts** TOFU at `~/.config/ssh-desk/known_hosts` (reject on key change)
+- **Recursive** upload / download / remote copy for directories
+- Editor save-back, image preview, processes, multi-session, diagnostics (`F9`)
+- Interactive host form (`a` / `n`)
+
+Still not full production: limited tests, no `ssh_config` import polish, etc.
 
 ## Add a host
 
@@ -21,7 +23,8 @@ Phase **7** complete, plus interactive host management and diagnostics:
 3. Fill Name / Host / Port / User; Space cycles Auth
 4. **Ctrl+S** (or Enter on the last field) to save
 
-Vault file: `~/.config/ssh-desk/hosts.toml`
+Vault file: `~/.config/ssh-desk/hosts.toml`  
+Host keys: `~/.config/ssh-desk/known_hosts`
 
 ## OS file drop
 

@@ -6,6 +6,7 @@ mod diagnostics;
 mod files;
 mod hit;
 mod hostform;
+mod term;
 mod transfers;
 mod ui;
 

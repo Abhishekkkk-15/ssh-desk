@@ -15,6 +15,7 @@ use crate::apps::{EditorState, ProcessesState};
 use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
+use crate::term::TermEmulator;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
 use crate::app::OverwritePrompt;
 
@@ -36,7 +37,7 @@ pub struct UiFrame<'a> {
     pub fullscreen_app: Option<AppKind>,
     pub desktop: Option<&'a Desktop>,
     pub status: &'a str,
-    pub term_buffer: &'a str,
+    pub term: &'a TermEmulator,
     pub clipboard_has_files: bool,
     pub clipboard_label: &'a str,
     pub files: &'a FilesState,
@@ -416,18 +417,8 @@ fn draw_app_body(
     frame.render_widget(Clear, area); // Wipe pane canvas to prevent layout overlap/residual text leaks
     match app {
         AppKind::Terminal => {
-            let text = if model.term_buffer.is_empty() {
-                "(empty shell)".into()
-            } else {
-                let lines: Vec<&str> = model.term_buffer.lines().collect();
-                let max = area.height as usize;
-                let start = lines.len().saturating_sub(max);
-                lines[start..].join("\n")
-            };
-            frame.render_widget(
-                Paragraph::new(text).style(Style::default().fg(Color::Green)),
-                area,
-            );
+            let lines = model.term.lines();
+            frame.render_widget(Paragraph::new(lines), area);
         }
         AppKind::Files => draw_files(frame, area, focused, model.files, model.drop_target),
         AppKind::Processes => draw_processes(frame, area, focused, model.processes),

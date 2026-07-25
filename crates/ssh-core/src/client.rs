@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::error::CoreError;
 use crate::fs::{remote_path_string, RemoteEntry, RemoteFileContent};
+use crate::known_hosts::{default_known_hosts_path, verify_server_key};
 use crate::pty::{PtyId, PtyOutput, PtySession};
 use crate::transfer::{TransferDirection, TransferId, TransferJob, TransferStatus};
 
@@ -35,17 +36,35 @@ enum PtyCommand {
     Resize { cols: u16, rows: u16 },
 }
 
-struct ClientHandler;
+struct ClientHandler {
+    host: String,
+    port: u16,
+    known_hosts: PathBuf,
+    /// Captures human-readable reject reasons (e.g. host key changed).
+    reject_reason: Arc<std::sync::Mutex<Option<String>>>,
+}
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Phase 1: accept; known_hosts verification lands later.
-        Ok(true)
+        match verify_server_key(
+            &self.host,
+            self.port,
+            server_public_key,
+            &self.known_hosts,
+        ) {
+            Ok(ok) => Ok(ok),
+            Err(e) => {
+                if let Ok(mut g) = self.reject_reason.lock() {
+                    *g = Some(e.to_string());
+                }
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -102,6 +121,14 @@ impl SessionHub {
         )));
 
         let config = Arc::new(client::Config::default());
+        let known_hosts = default_known_hosts_path()?;
+        let reject_reason = Arc::new(std::sync::Mutex::new(None));
+        let make_handler = || ClientHandler {
+            host: profile.host.clone(),
+            port: profile.port,
+            known_hosts: known_hosts.clone(),
+            reject_reason: Arc::clone(&reject_reason),
+        };
 
         // Jump-host tunneling: if this profile has jump_via, open a direct-tcpip
         // channel on the already-connected jump session and layer SSH over it.
@@ -116,10 +143,7 @@ impl SessionHub {
                         jump_id
                     ))
                 })?;
-            let (host, port) = (
-                profile.host.clone(),
-                profile.port,
-            );
+            let (host, port) = (profile.host.clone(), profile.port);
             let channel: Channel<russh::client::Msg> = jump
                 .handle
                 .channel_open_direct_tcpip(&host, port as u32, "127.0.0.1", 0)
@@ -127,13 +151,27 @@ impl SessionHub {
                 .map_err(|e| CoreError::Ssh(format!("jump tcpip: {e}")))?;
             drop(sessions);
             let stream = channel.into_stream();
-            client::connect_stream(config, stream, ClientHandler)
+            client::connect_stream(config, stream, make_handler())
                 .await
-                .map_err(|e| CoreError::Ssh(format!("jump SSH: {e}")))?  
+                .map_err(|e| {
+                    if let Ok(g) = reject_reason.lock() {
+                        if let Some(reason) = g.as_ref() {
+                            return CoreError::Auth(reason.clone());
+                        }
+                    }
+                    CoreError::Ssh(format!("jump SSH: {e}"))
+                })?
         } else {
-            client::connect(config, addr.as_str(), ClientHandler)
+            client::connect(config, addr.as_str(), make_handler())
                 .await
-                .map_err(|e| CoreError::Ssh(e.to_string()))?
+                .map_err(|e| {
+                    if let Ok(g) = reject_reason.lock() {
+                        if let Some(reason) = g.as_ref() {
+                            return CoreError::Auth(reason.clone());
+                        }
+                    }
+                    CoreError::Ssh(e.to_string())
+                })?
         };
 
         authenticate(&mut handle, &profile, vault, password_passphrase).await?;
@@ -489,15 +527,20 @@ impl SessionHub {
         remote_dir: PathBuf,
         cut: bool,
     ) -> Result<TransferId, CoreError> {
-        if !local_path.is_file() {
+        let meta = tokio::fs::metadata(&local_path)
+            .await
+            .map_err(CoreError::Io)?;
+        if meta.is_dir() {
+            return self
+                .enqueue_upload_tree(host_id, local_path, remote_dir, cut)
+                .await;
+        }
+        if !meta.is_file() {
             return Err(CoreError::Message(format!(
                 "not a local file: {}",
                 local_path.display()
             )));
         }
-        let meta = tokio::fs::metadata(&local_path)
-            .await
-            .map_err(CoreError::Io)?;
         let name = local_path
             .file_name()
             .ok_or_else(|| CoreError::Message("invalid local path".into()))?;
@@ -529,6 +572,65 @@ impl SessionHub {
         Ok(id)
     }
 
+    /// Recursively upload a local directory into `remote_dir/<dirname>/`.
+    pub async fn enqueue_upload_tree(
+        self: &Arc<Self>,
+        host_id: &str,
+        local_dir: PathBuf,
+        remote_dir: PathBuf,
+        cut: bool,
+    ) -> Result<TransferId, CoreError> {
+        let name = local_dir
+            .file_name()
+            .ok_or_else(|| CoreError::Message("invalid local directory".into()))?
+            .to_owned();
+        let remote_root = remote_dir.join(&name);
+        let files = walk_local_files(&local_dir).await?;
+        let total: u64 = files.iter().map(|(_, sz)| *sz).sum();
+        let sftp = self.sftp_arc(host_id).await?;
+
+        let mut job = TransferJob::new(
+            host_id,
+            TransferDirection::Upload,
+            local_dir.clone(),
+            remote_root.clone(),
+            Some(total),
+        );
+        if cut {
+            job = job.with_delete_local();
+        }
+        let id = job.id;
+        let cancel = Arc::clone(&job.cancel);
+        self.transfers.lock().await.push(job.clone());
+        let _ = self
+            .events_tx
+            .send(SessionEvent::TransferUpdate(job.clone()));
+
+        let hub = Arc::clone(self);
+        let host_id = host_id.to_owned();
+        tokio::spawn(async move {
+            let result = run_upload_tree(
+                sftp,
+                local_dir,
+                remote_root,
+                files,
+                cancel,
+                &hub,
+                id,
+                cut,
+            )
+            .await;
+            if let Err(e) = &result {
+                let _ = hub
+                    .events_tx
+                    .send(SessionEvent::Error(format!("tree upload · {e}")));
+            }
+            hub.finish_transfer(id, result).await;
+            let _ = host_id;
+        });
+        Ok(id)
+    }
+
     /// Queue a remote → local download.
     pub async fn enqueue_download(
         self: &Arc<Self>,
@@ -550,14 +652,18 @@ impl SessionHub {
         cut: bool,
     ) -> Result<TransferId, CoreError> {
         let sftp = self.sftp_arc(host_id).await?;
-        let bytes_total = if remote_size.is_some() {
-            remote_size
-        } else {
-            sftp.metadata(remote_path_string(&remote_path))
-                .await
-                .ok()
-                .and_then(|m| m.size)
-        };
+        let meta = sftp.metadata(remote_path_string(&remote_path)).await.ok();
+        let is_dir = meta
+            .as_ref()
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            return self
+                .enqueue_download_tree(host_id, remote_path, local_path, cut)
+                .await;
+        }
+
+        let bytes_total = remote_size.or_else(|| meta.and_then(|m| m.size));
 
         let mut job = TransferJob::new(
             host_id,
@@ -584,7 +690,46 @@ impl SessionHub {
         Ok(id)
     }
 
-    /// Same-host remote file copy (source in `from`, destination file path in `to`).
+    /// Recursively download a remote directory into `local_path` (created as the root).
+    pub async fn enqueue_download_tree(
+        self: &Arc<Self>,
+        host_id: &str,
+        remote_dir: PathBuf,
+        local_path: PathBuf,
+        cut: bool,
+    ) -> Result<TransferId, CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        let files = walk_remote_files(&sftp, &remote_dir).await?;
+        let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum();
+
+        let mut job = TransferJob::new(
+            host_id,
+            TransferDirection::Download,
+            local_path.clone(),
+            remote_dir.clone(),
+            Some(total),
+        );
+        if cut {
+            job = job.with_delete_remote();
+        }
+        let id = job.id;
+        let cancel = Arc::clone(&job.cancel);
+        self.transfers.lock().await.push(job.clone());
+        let _ = self
+            .events_tx
+            .send(SessionEvent::TransferUpdate(job.clone()));
+
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            let result =
+                run_download_tree(sftp, remote_dir, local_path, files, cancel, &hub, id, cut)
+                    .await;
+            hub.finish_transfer(id, result).await;
+        });
+        Ok(id)
+    }
+
+    /// Same-host remote file/directory copy.
     pub async fn enqueue_remote_copy(
         self: &Arc<Self>,
         host_id: &str,
@@ -592,11 +737,13 @@ impl SessionHub {
         to: PathBuf,
     ) -> Result<TransferId, CoreError> {
         let sftp = self.sftp_arc(host_id).await?;
-        let bytes_total = sftp
-            .metadata(remote_path_string(&from))
-            .await
-            .ok()
-            .and_then(|m| m.size);
+        let meta = sftp.metadata(remote_path_string(&from)).await.ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        if is_dir {
+            return self.enqueue_remote_copy_tree(host_id, from, to).await;
+        }
+
+        let bytes_total = meta.and_then(|m| m.size);
 
         // local_path field stores the remote source for RemoteCopy jobs.
         let job = TransferJob::new(
@@ -616,6 +763,38 @@ impl SessionHub {
         let hub = Arc::clone(self);
         tokio::spawn(async move {
             let result = run_remote_copy(sftp, from, to, cancel, &hub, id).await;
+            hub.finish_transfer(id, result).await;
+        });
+        Ok(id)
+    }
+
+    pub async fn enqueue_remote_copy_tree(
+        self: &Arc<Self>,
+        host_id: &str,
+        from: PathBuf,
+        to: PathBuf,
+    ) -> Result<TransferId, CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        let files = walk_remote_files(&sftp, &from).await?;
+        let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum();
+
+        let job = TransferJob::new(
+            host_id,
+            TransferDirection::RemoteCopy,
+            from.clone(),
+            to.clone(),
+            Some(total),
+        );
+        let id = job.id;
+        let cancel = Arc::clone(&job.cancel);
+        self.transfers.lock().await.push(job.clone());
+        let _ = self
+            .events_tx
+            .send(SessionEvent::TransferUpdate(job.clone()));
+
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = run_remote_copy_tree(sftp, from, to, files, cancel, &hub, id).await;
             hub.finish_transfer(id, result).await;
         });
         Ok(id)
@@ -779,6 +958,19 @@ async fn run_upload(
     hub: &SessionHub,
     id: TransferId,
 ) -> Result<(), CoreError> {
+    run_upload_ex(sftp, local_path, remote_path, cancel, hub, id, true, 0).await
+}
+
+async fn run_upload_ex(
+    sftp: Arc<SftpSession>,
+    local_path: PathBuf,
+    remote_path: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+    track_progress: bool,
+    progress_base: u64,
+) -> Result<(), CoreError> {
     use std::sync::atomic::Ordering;
 
     let mut local = tokio::fs::File::open(&local_path)
@@ -808,7 +1000,9 @@ async fn run_upload(
             .await
             .map_err(|e| CoreError::Sftp(e.to_string()))?;
         done += n as u64;
-        hub.bump_progress(id, done).await;
+        if track_progress {
+            hub.bump_progress(id, progress_base + done).await;
+        }
     }
     let _ = remote.shutdown().await;
     Ok(())
@@ -821,6 +1015,19 @@ async fn run_remote_copy(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     hub: &SessionHub,
     id: TransferId,
+) -> Result<(), CoreError> {
+    run_remote_copy_ex(sftp, from, to, cancel, hub, id, true, 0).await
+}
+
+async fn run_remote_copy_ex(
+    sftp: Arc<SftpSession>,
+    from: PathBuf,
+    to: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+    track_progress: bool,
+    progress_base: u64,
 ) -> Result<(), CoreError> {
     use std::sync::atomic::Ordering;
 
@@ -855,7 +1062,9 @@ async fn run_remote_copy(
             .await
             .map_err(|e| CoreError::Sftp(e.to_string()))?;
         done += n as u64;
-        hub.bump_progress(id, done).await;
+        if track_progress {
+            hub.bump_progress(id, progress_base + done).await;
+        }
     }
     let _ = dst.shutdown().await;
     Ok(())
@@ -868,6 +1077,19 @@ async fn run_download(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     hub: &SessionHub,
     id: TransferId,
+) -> Result<(), CoreError> {
+    run_download_ex(sftp, remote_path, local_path, cancel, hub, id, true, 0).await
+}
+
+async fn run_download_ex(
+    sftp: Arc<SftpSession>,
+    remote_path: PathBuf,
+    local_path: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+    track_progress: bool,
+    progress_base: u64,
 ) -> Result<(), CoreError> {
     use std::sync::atomic::Ordering;
 
@@ -901,7 +1123,9 @@ async fn run_download(
         }
         local.write_all(&buf[..n]).await.map_err(CoreError::Io)?;
         done += n as u64;
-        hub.bump_progress(id, done).await;
+        if track_progress {
+            hub.bump_progress(id, progress_base + done).await;
+        }
     }
     local.flush().await.map_err(CoreError::Io)?;
     Ok(())
@@ -1006,4 +1230,214 @@ async fn auth_private_key(
     } else {
         Err(CoreError::Auth(format!("key auth failed: {result:?}")))
     }
+}
+
+/// Collect `(absolute_local_path, size)` for every file under `root`.
+async fn walk_local_files(root: &Path) -> Result<Vec<(PathBuf, u64)>, CoreError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut rd = tokio::fs::read_dir(&dir).await.map_err(CoreError::Io)?;
+        while let Some(entry) = rd.next_entry().await.map_err(CoreError::Io)? {
+            let path = entry.path();
+            let meta = entry.metadata().await.map_err(CoreError::Io)?;
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.push((path, meta.len()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Collect `(absolute_remote_path, relative_from_root, size)`.
+async fn walk_remote_files(
+    sftp: &SftpSession,
+    root: &Path,
+) -> Result<Vec<(PathBuf, PathBuf, u64)>, CoreError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = sftp
+            .read_dir(remote_path_string(&dir))
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        for entry in entries {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let path = PathBuf::from(entry.path());
+            if entry.file_type().is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(Path::new(&name))
+                    .to_path_buf();
+                let size = entry.metadata().size.unwrap_or(0);
+                out.push((path, rel, size));
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn ensure_remote_dir(sftp: &SftpSession, path: &Path) -> Result<(), CoreError> {
+    let mut cur = PathBuf::new();
+    for comp in path.components() {
+        use std::path::Component;
+        match comp {
+            Component::RootDir => {
+                cur = PathBuf::from("/");
+                continue;
+            }
+            Component::Normal(s) => cur.push(s),
+            _ => continue,
+        }
+        let s = remote_path_string(&cur);
+        if s.is_empty() || s == "/" {
+            continue;
+        }
+        match sftp.metadata(&s).await {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(CoreError::Sftp(format!(
+                    "path exists but is not a directory: {s}"
+                )));
+            }
+            Err(_) => {
+                let _ = sftp.create_dir(&s).await.map_err(|e| {
+                    CoreError::Sftp(format!("mkdir {s}: {e}"))
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_upload_tree(
+    sftp: Arc<SftpSession>,
+    local_root: PathBuf,
+    remote_root: PathBuf,
+    files: Vec<(PathBuf, u64)>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+    cut: bool,
+) -> Result<(), CoreError> {
+    use std::sync::atomic::Ordering;
+
+    ensure_remote_dir(&sftp, &remote_root).await?;
+    let mut base = 0u64;
+    for (local, sz) in files {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CoreError::Message("cancelled".into()));
+        }
+        let rel = local
+            .strip_prefix(&local_root)
+            .map_err(|_| CoreError::Message("path not under upload root".into()))?;
+        let remote = remote_root.join(rel);
+        if let Some(parent) = remote.parent() {
+            ensure_remote_dir(&sftp, parent).await?;
+        }
+        run_upload_ex(
+            Arc::clone(&sftp),
+            local,
+            remote,
+            Arc::clone(&cancel),
+            hub,
+            id,
+            true,
+            base,
+        )
+        .await?;
+        base += sz;
+        hub.bump_progress(id, base).await;
+    }
+    if cut {
+        let _ = tokio::fs::remove_dir_all(&local_root).await;
+    }
+    Ok(())
+}
+
+async fn run_download_tree(
+    sftp: Arc<SftpSession>,
+    remote_root: PathBuf,
+    local_root: PathBuf,
+    files: Vec<(PathBuf, PathBuf, u64)>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+    cut: bool,
+) -> Result<(), CoreError> {
+    use std::sync::atomic::Ordering;
+
+    tokio::fs::create_dir_all(&local_root)
+        .await
+        .map_err(CoreError::Io)?;
+    let mut base = 0u64;
+    for (remote, rel, sz) in files {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CoreError::Message("cancelled".into()));
+        }
+        let local = local_root.join(&rel);
+        run_download_ex(
+            Arc::clone(&sftp),
+            remote.clone(),
+            local,
+            Arc::clone(&cancel),
+            hub,
+            id,
+            true,
+            base,
+        )
+        .await?;
+        base += sz;
+        hub.bump_progress(id, base).await;
+        if cut {
+            let _ = sftp.remove_file(remote_path_string(&remote)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn run_remote_copy_tree(
+    sftp: Arc<SftpSession>,
+    from_root: PathBuf,
+    to_root: PathBuf,
+    files: Vec<(PathBuf, PathBuf, u64)>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    hub: &SessionHub,
+    id: TransferId,
+) -> Result<(), CoreError> {
+    use std::sync::atomic::Ordering;
+
+    ensure_remote_dir(&sftp, &to_root).await?;
+    let mut base = 0u64;
+    for (from, rel, sz) in files {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CoreError::Message("cancelled".into()));
+        }
+        let to = to_root.join(&rel);
+        if let Some(parent) = to.parent() {
+            ensure_remote_dir(&sftp, parent).await?;
+        }
+        run_remote_copy_ex(
+            Arc::clone(&sftp),
+            from,
+            to,
+            Arc::clone(&cancel),
+            hub,
+            id,
+            true,
+            base,
+        )
+        .await?;
+        base += sz;
+        hub.bump_progress(id, base).await;
+    }
+    let _ = from_root;
+    Ok(())
 }

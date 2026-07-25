@@ -43,11 +43,11 @@ pub fn parse_os_paths(raw: &str) -> Vec<PathBuf> {
     out
 }
 
-/// Keep only paths that currently exist as files (directories skipped for upload).
+/// Keep paths that currently exist as files or directories.
 pub fn existing_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() || p.is_dir())
         .cloned()
         .collect()
 }
