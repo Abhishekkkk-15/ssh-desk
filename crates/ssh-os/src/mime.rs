@@ -21,10 +21,10 @@ pub fn sniff_open_action(path: &Path) -> OpenAction {
         .to_ascii_lowercase();
 
     match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => OpenAction::PreviewImage,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => OpenAction::PreviewImage,
         "rs" | "toml" | "md" | "txt" | "json" | "yaml" | "yml" | "py" | "js" | "ts"
         | "go" | "c" | "h" | "cpp" | "hpp" | "sh" | "bash" | "zsh" | "css" | "html" | "xml"
-        | "ini" | "cfg" | "conf" | "log" | "env" => OpenAction::EditText,
+        | "ini" | "cfg" | "conf" | "log" | "env" | "svg" => OpenAction::EditText,
         "bin" | "so" | "o" | "a" | "exe" | "dll" | "wasm" => OpenAction::Hex,
         _ => OpenAction::ViewText,
     }
