@@ -533,11 +533,34 @@ impl App {
                 }
                 SessionEvent::PtyData(out) => {
                     if let Ok(txt) = std::str::from_utf8(&out.data) {
-                        // Strip ANSI control/escape sequence codes (like cursor positioning '16;21H')
-                        // so they don't corrupt the terminal display layout.
-                        let cleaned = strip_ansi_escapes(txt);
                         if let Some(slot) = self.slot_mut() {
-                            slot.demo_term.push_str(&cleaned);
+                            let mut chars = txt.chars().peekable();
+                            while let Some(c) = chars.next() {
+                                if c == '\x1b' {
+                                    if chars.peek() == Some(&'[') {
+                                        let _ = chars.next(); // consume '['
+                                        // Consume arguments up to letter code
+                                        while let Some(&c2) = chars.peek() {
+                                            let _ = chars.next();
+                                            if c2.is_ascii_alphabetic() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else if c == '\x08' {
+                                    slot.demo_term.pop();
+                                    if chars.peek() == Some(&' ') {
+                                        let _ = chars.next();
+                                        if chars.peek() == Some(&'\x08') {
+                                            let _ = chars.next();
+                                        }
+                                    }
+                                } else if c == '\x7f' {
+                                    slot.demo_term.pop();
+                                } else {
+                                    slot.demo_term.push(c);
+                                }
+                            }
                             if slot.demo_term.len() > 200_000 {
                                 let keep = slot.demo_term.len() - 200_000;
                                 slot.demo_term.drain(..keep);
@@ -2126,37 +2149,4 @@ fn restore_terminal(terminal: &mut DefaultTerminal) -> Result<()> {
     terminal.show_cursor()?;
     let _ = io::stdout().flush();
     Ok(())
-}
-
-fn strip_ansi_escapes(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                let _ = chars.next(); // consume '['
-                // Consume arguments up to letter code
-                while let Some(&c2) = chars.peek() {
-                    let _ = chars.next();
-                    if c2.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else if c == '\x08' {
-            // PTY erases by sending: BS ('\x08'), Space (' '), BS ('\x08')
-            result.pop();
-            if chars.peek() == Some(&' ') {
-                let _ = chars.next(); // consume space
-                if chars.peek() == Some(&'\x08') {
-                    let _ = chars.next(); // consume second BS
-                }
-            }
-        } else if c == '\x7f' {
-            result.pop();
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
