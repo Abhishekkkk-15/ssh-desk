@@ -16,6 +16,7 @@ pub struct FilesState {
     pub loading: bool,
     pub error: Option<String>,
     pub online: bool,
+    pub search_query: Option<String>,
 }
 
 impl Default for FilesState {
@@ -28,6 +29,7 @@ impl Default for FilesState {
             loading: false,
             error: None,
             online: false,
+            search_query: None,
         }
     }
 }
@@ -63,6 +65,7 @@ impl FilesState {
             loading: false,
             error: Some("offline · demo listing (connect for live SFTP)".into()),
             online: false,
+            search_query: None,
         }
     }
 
@@ -74,15 +77,22 @@ impl FilesState {
         self.loading = false;
         self.error = None;
         self.online = true;
+        self.search_query = None;
     }
 
     pub fn rows(&self) -> Vec<FilesRow> {
         let mut rows = Vec::new();
-        if self.cwd != Path::new("/") {
+        if self.cwd != Path::new("/") && self.search_query.is_none() {
             rows.push(FilesRow::Parent);
         }
-        for (i, _) in self.entries.iter().enumerate() {
-            rows.push(FilesRow::Entry(i));
+        for (i, entry) in self.entries.iter().enumerate() {
+            if let Some(query) = &self.search_query {
+                if entry.name.to_lowercase().contains(&query.to_lowercase()) {
+                    rows.push(FilesRow::Entry(i));
+                }
+            } else {
+                rows.push(FilesRow::Entry(i));
+            }
         }
         rows
     }

@@ -509,8 +509,13 @@ fn draw_files(
     }
 
     if focused {
+        let help = if files.search_query.is_some() {
+            "searching · Backspace edit · Esc cancel query · Enter lock"
+        } else {
+            "/ search · drag files · Shift+drop move · Space mark · Ctrl+C/X/V"
+        };
         lines.push(Line::from(Span::styled(
-            "drag files · Shift+drop move · Space mark · Ctrl+C/X/V",
+            help,
             Style::default().fg(Color::DarkGray),
         )));
     }

@@ -116,6 +116,7 @@ pub struct App {
     /// Show the session-switcher overlay.
     show_session_switcher: bool,
     full_screen: bool,
+    files_search: Option<String>,
     should_quit: bool,
     connect_in_flight: bool,
 }
@@ -153,6 +154,7 @@ impl App {
             os_drop: None,
             show_session_switcher: false,
             full_screen: false,
+            files_search: None,
             should_quit: false,
             connect_in_flight: false,
         }
@@ -908,6 +910,48 @@ impl App {
             self.show_session_switcher = !self.show_session_switcher;
             return Ok(());
         }
+        
+        // ── Files Search Mode ───────────────────────────────────────────
+        if self.files_search.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.files_search = None;
+                    if let Some(s) = self.slot_mut() {
+                        s.files.search_query = None;
+                        s.files.selected = 0;
+                    }
+                    self.status = "search cancelled".into();
+                }
+                KeyCode::Enter => {
+                    self.files_search = None;
+                    self.status = "search query locked".into();
+                }
+                KeyCode::Backspace => {
+                    if let Some(q) = self.files_search.as_mut() {
+                        q.pop();
+                    }
+                    let q = self.files_search.clone();
+                    if let Some(s) = self.slot_mut() {
+                        s.files.search_query = q.clone();
+                        s.files.selected = 0;
+                    }
+                    self.status = format!("searching · {}", q.unwrap_or_default());
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(q) = self.files_search.as_mut() {
+                        q.push(c);
+                    }
+                    let q = self.files_search.clone();
+                    if let Some(s) = self.slot_mut() {
+                        s.files.search_query = q.clone();
+                        s.files.selected = 0;
+                    }
+                    self.status = format!("searching · {}", q.unwrap_or_default());
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         if key.code == KeyCode::F(11) {
             let next_mode = if let Some(s) = self.slot_mut() {
                 if s.fullscreen_app.is_some() {
@@ -1174,6 +1218,10 @@ impl App {
             KeyCode::End => {
                 let len = self.slot().map(|s| s.files.rows().len()).unwrap_or(0);
                 if len > 0 { if let Some(s) = self.slot_mut() { s.files.selected = len - 1; } }
+            }
+            KeyCode::Char('/') => {
+                self.files_search = Some(String::new());
+                self.status = "searching · type search query...".into();
             }
             _ => {}
         }
@@ -1883,7 +1931,11 @@ impl App {
             full_screen: self.full_screen,
             fullscreen_app: self.slot().and_then(|s| s.fullscreen_app),
             desktop,
-            status: &self.status,
+            status: if let Some(_q) = &self.files_search {
+                &self.status // keep custom search query prompt status
+            } else {
+                &self.status
+            },
             term_buffer,
             clipboard_has_files: self.clipboard.has_files(),
             clipboard_label: match self.clipboard.file_op() {
