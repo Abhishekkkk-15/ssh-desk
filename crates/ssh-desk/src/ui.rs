@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+use crate::theme::Theme as Th;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -57,8 +58,11 @@ pub struct UiFrame<'a> {
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let area = frame.area();
-    frame.render_widget(Clear, area); // Clear entire screen buffer to avoid overlap leaks
-    
+    // Soft slate canvas (avoid pure pitch-black).
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Th::BG)),
+        area,
+    );
     if model.screen == ScreenKind::Desktop && model.full_screen {
         if let Some(desktop) = model.desktop {
             draw_desktop(frame, area, desktop, model);
@@ -142,11 +146,11 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Span::styled(
             " ssh-desk ",
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("▌", Style::default().fg(Color::Cyan).bg(Color::Rgb(24, 28, 36))),
+        Span::styled("▌", Style::default().fg(Th::ACCENT).bg(Th::CHROME)),
     ];
 
     match model.screen {
@@ -154,15 +158,15 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             spans.push(Span::styled(
                 " LAUNCHER ",
                 Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::Rgb(24, 28, 36))
+                    .fg(Th::ACCENT)
+                    .bg(Th::CHROME)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 " remote OS shell",
                 Style::default()
-                    .fg(Color::Gray)
-                    .bg(Color::Rgb(24, 28, 36)),
+                    .fg(Th::FG_MUTED)
+                    .bg(Th::CHROME),
             ));
         }
         ScreenKind::Desktop => {
@@ -171,23 +175,23 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 spans.push(Span::styled(
                     " DESKTOP ",
                     Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Rgb(24, 28, 36))
+                        .fg(Th::ACCENT)
+                        .bg(Th::CHROME)
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     format!(" {name} "),
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Rgb(24, 28, 36))
+                        .fg(Th::FG)
+                        .bg(Th::CHROME)
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::styled(
                     " SESSIONS ",
                     Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Rgb(24, 28, 36))
+                        .fg(Th::ACCENT)
+                        .bg(Th::CHROME)
                         .add_modifier(Modifier::BOLD),
                 ));
                 for (i, name) in model.sessions.iter().enumerate() {
@@ -195,13 +199,13 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                     let label = format!(" {}:{} ", i + 1, name);
                     let style = if active {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Green)
+                            .fg(Th::ON_ACCENT)
+                            .bg(Th::OK)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
-                            .fg(Color::DarkGray)
-                            .bg(Color::Rgb(24, 28, 36))
+                            .fg(Th::FG_DIM)
+                            .bg(Th::CHROME)
                     };
                     spans.push(Span::styled(label, style));
                 }
@@ -211,8 +215,8 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                     spans.push(Span::styled(
                         " │ Ctrl+Tab · F8 · Ctrl+W ",
                         Style::default()
-                            .fg(Color::DarkGray)
-                            .bg(Color::Rgb(24, 28, 36)),
+                            .fg(Th::FG_DIM)
+                            .bg(Th::CHROME),
                     ));
                 }
             }
@@ -221,7 +225,7 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
     // Fill remaining title bar so the strip reads as one solid band.
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(24, 28, 36))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::CHROME)),
         area,
     );
 }
@@ -247,11 +251,11 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
             let label = format!("{marker}[{key}] {name}");
             let style = if i == model.active_session_idx {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
+                    .fg(Th::ON_ACCENT)
+                    .bg(Th::OK)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(Th::FG)
             };
             ListItem::new(Line::from(Span::styled(label, style)))
         })
@@ -264,7 +268,7 @@ fn draw_session_switcher(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Sessions  (j/k·1-9·Enter·F8) ")
-            .border_style(Style::default().fg(Color::Green)),
+            .border_style(Style::default().fg(Th::OK)),
     );
     frame.render_widget(list, rect);
 }
@@ -288,7 +292,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
             );
             let style = if i == model.selected_host {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Th::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -301,7 +305,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Hosts ")
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Th::FG_DIM)),
     );
     frame.render_widget(list, chunks[0]);
 
@@ -324,7 +328,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Welcome ")
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Th::FG_DIM)),
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(help, chunks[1]);
@@ -377,16 +381,19 @@ fn draw_pane_leaf(
 ) {
     let border = if drop_hot {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(Th::WARN)
             .add_modifier(Modifier::BOLD)
     } else if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Th::ACCENT)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Th::FG_DIM)
     };
 
     // Border only — title lives in a dedicated header strip below.
-    let block = Block::default().borders(Borders::ALL).border_style(border);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .style(Style::default().bg(Th::BG));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -418,11 +425,11 @@ fn draw_pane_header(
     let focus_mark = if focused { " ●" } else { "" };
 
     let (fg, bg) = if drop_hot {
-        (Color::Black, Color::Yellow)
+        (Th::ON_ACCENT, Th::WARN)
     } else if focused {
-        (Color::Black, Color::Cyan)
+        (Th::ON_ACCENT, Th::ACCENT)
     } else {
-        (Color::Gray, Color::Rgb(32, 36, 44))
+        (Th::FG_MUTED, Th::SURFACE)
     };
 
     let mut spans = vec![Span::styled(
@@ -436,7 +443,7 @@ fn draw_pane_header(
     if !detail.is_empty() {
         spans.push(Span::styled(
             format!(" {detail} "),
-            Style::default().fg(Color::DarkGray).bg(bg),
+            Style::default().fg(Th::FG_DIM).bg(bg),
         ));
     }
 
@@ -530,7 +537,7 @@ fn draw_files(
     if let Some(err) = &files.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(Th::WARN),
         )));
     }
     if files.loading {
@@ -574,18 +581,18 @@ fn draw_files(
         let is_drop = drop_path.is_some_and(|dp| row_path.as_ref().is_some_and(|rp| rp == dp));
         let style = if is_drop {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::WARN)
                 .add_modifier(Modifier::BOLD)
         } else if selected && focused {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else if selected {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(Th::ACCENT)
         } else if is_dir {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Th::WARN)
         } else {
             Style::default()
         };
@@ -611,7 +618,7 @@ fn draw_files(
         };
         lines.push(Line::from(Span::styled(
             help,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Th::FG_DIM),
         )));
     }
 
@@ -643,16 +650,16 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
             );
             let style = if selected && focused {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(Th::ON_ACCENT)
+                    .bg(Th::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else if selected {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Th::ACCENT)
             } else {
                 match job.status {
-                    ssh_core::TransferStatus::Failed => Style::default().fg(Color::Red),
-                    ssh_core::TransferStatus::Done => Style::default().fg(Color::Green),
-                    ssh_core::TransferStatus::Running => Style::default().fg(Color::Yellow),
+                    ssh_core::TransferStatus::Failed => Style::default().fg(Th::ERR),
+                    ssh_core::TransferStatus::Done => Style::default().fg(Th::OK),
+                    ssh_core::TransferStatus::Running => Style::default().fg(Th::WARN),
                     _ => Style::default(),
                 }
             };
@@ -670,12 +677,12 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
                 );
                 lines.push(Line::from(Span::styled(
                     detail,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Th::FG_DIM),
                 )));
                 if let Some(err) = &job.error {
                     lines.push(Line::from(Span::styled(
                         format!("  {err}"),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(Th::ERR),
                     )));
                 }
             }
@@ -684,7 +691,7 @@ fn draw_transfers(frame: &mut Frame<'_>, area: Rect, focused: bool, transfers: &
     if focused {
         lines.push(Line::from(Span::styled(
             "c cancel · r retry · u/d queue",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Th::FG_DIM),
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -717,7 +724,7 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Add host ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(Th::ACCENT));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -754,8 +761,8 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
         let label = format!("{:<10} {}", format!("{}:", field.label()), value);
         let style = if focused {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -766,13 +773,13 @@ fn draw_host_form(frame: &mut Frame<'_>, area: Rect, form: &HostForm) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Color::Red),
+            Style::default().fg(Th::ERR),
         )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Tab next · Ctrl+S save · Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Th::FG_DIM),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -794,7 +801,7 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Unlock vault · {} ", prompt.host_name))
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Th::WARN));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -804,7 +811,7 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
             Line::from(Span::styled(
                 "  connecting... please wait",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Th::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -819,20 +826,20 @@ fn draw_vault_unlock(frame: &mut Frame<'_>, area: Rect, prompt: &VaultUnlockProm
         Line::from(Span::styled(
             format!("> {masked}"),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::WARN)
                 .add_modifier(Modifier::BOLD),
         )),
     ];
     if let Some(err) = &prompt.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Color::Red),
+            Style::default().fg(Th::ERR),
         )));
     }
     lines.push(Line::from(Span::styled(
         "Enter connect · Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Th::FG_DIM),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -853,7 +860,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", prompt.title))
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(Th::ACCENT));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -883,10 +890,10 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
                 format!("> {}", prompt.buffer),
                 if prompt.editing {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(Th::ON_ACCENT)
+                        .bg(Th::ACCENT)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(Th::FG)
                 },
             )),
         ]),
@@ -895,12 +902,12 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
 
     let mut lines = vec![Line::from(Span::styled(
         format!("local: {}", prompt.browse_cwd.display()),
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(Th::WARN),
     ))];
     if let Some(err) = &prompt.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Color::Red),
+            Style::default().fg(Th::ERR),
         )));
     }
     let visible = chunks[1].height.saturating_sub(1) as usize;
@@ -922,11 +929,11 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
         let selected = idx == prompt.browse_selected && !prompt.editing;
         let style = if selected {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else if entry.is_dir {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Th::WARN)
         } else {
             Style::default()
         };
@@ -966,7 +973,7 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" OS file drop ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Th::WARN));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -987,19 +994,19 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
 
     let upload_style = if offer.selected == 0 {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
+            .fg(Th::ON_ACCENT)
+            .bg(Th::WARN)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Th::FG_MUTED)
     };
     let cancel_style = if offer.selected == 1 {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::DarkGray)
+            .fg(Th::ON_ACCENT)
+            .bg(Th::FG_DIM)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Th::FG_MUTED)
     };
     lines.push(Line::from(vec![
         Span::styled(" Upload ", upload_style),
@@ -1008,7 +1015,7 @@ fn draw_os_drop_confirm(frame: &mut Frame<'_>, area: Rect, offer: &OsDropOffer) 
     ]));
     lines.push(Line::from(Span::styled(
         "Enter/y confirm · Tab switch · Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Th::FG_DIM),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1033,7 +1040,7 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
             " Diagnostics · {} entries · F9/Esc close ",
             diag.entries.len()
         ))
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(Th::ERR));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -1054,16 +1061,16 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
     }
     for entry in slice {
         let color = match entry.level {
-            DiagLevel::Info => Color::Gray,
-            DiagLevel::Warn => Color::Yellow,
-            DiagLevel::Error => Color::Red,
+            DiagLevel::Info => Th::FG_MUTED,
+            DiagLevel::Warn => Th::WARN,
+            DiagLevel::Error => Th::ERR,
         };
         // Compact clock: last 5 digits of epoch seconds is enough as relative marker.
         let clock = entry.ts_secs % 100_000;
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{clock:05} ",),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Th::FG_DIM),
             ),
             Span::styled(
                 format!("[{}] ", entry.level.tag()),
@@ -1076,7 +1083,7 @@ fn draw_diagnostics(frame: &mut Frame<'_>, area: Rect, diag: &DiagnosticsState) 
     frame.render_widget(
         Paragraph::new(Span::styled(
             "j/k scroll · PgUp/PgDn · Home/End · c clear",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Th::FG_DIM),
         )),
         chunks[1],
     );
@@ -1098,14 +1105,14 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", prompt.title))
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(Th::ERR));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
     let mut lines = vec![
         Line::from(Span::styled(
             "The following file(s) already exist on the target folder. Overwrite?",
-            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            Style::default().fg(Th::ERR).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -1119,19 +1126,19 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
 
     let yes_style = if prompt.selected == 0 {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
+            .fg(Th::ON_ACCENT)
+            .bg(Th::ERR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Th::FG_MUTED)
     };
     let no_style = if prompt.selected == 1 {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::DarkGray)
+            .fg(Th::ON_ACCENT)
+            .bg(Th::FG_DIM)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Th::FG_MUTED)
     };
     lines.push(Line::from(vec![
         Span::styled(" Yes, Overwrite ", yes_style),
@@ -1140,7 +1147,7 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
     ]));
     lines.push(Line::from(Span::styled(
         "Enter confirm · Tab switch · Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Th::FG_DIM),
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1189,8 +1196,8 @@ fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&Dr
     frame.render_widget(
         Paragraph::new(text).style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::WARN)
                 .add_modifier(Modifier::BOLD),
         ),
         rect,
@@ -1212,7 +1219,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
         let mut lines = vec![Line::from(Span::styled(
             format!("{}  {}", viewer.title, preview.meta),
             Style::default()
-                .fg(Color::Magenta)
+                .fg(Th::INFO)
                 .add_modifier(Modifier::BOLD),
         ))];
         let max = area.height.saturating_sub(1) as usize;
@@ -1253,7 +1260,7 @@ fn draw_viewer(frame: &mut Frame<'_>, area: Rect, viewer: &ViewerState) {
     let mut lines = vec![Line::from(Span::styled(
         header,
         Style::default()
-            .fg(Color::Magenta)
+            .fg(Th::INFO)
             .add_modifier(Modifier::BOLD),
     ))];
     for line in slice {
@@ -1283,7 +1290,7 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &Editor
     let mut lines = vec![Line::from(Span::styled(
         header,
         Style::default()
-            .fg(Color::Yellow)
+            .fg(Th::WARN)
             .add_modifier(Modifier::BOLD),
     ))];
 
@@ -1304,8 +1311,8 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, focused: bool, editor: &Editor
             spans.push(Span::styled(
                 ch.to_string(),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(Th::ON_ACCENT)
+                    .bg(Th::ACCENT)
                     .add_modifier(Modifier::BOLD),
             ));
             if col < chars.len() {
@@ -1328,7 +1335,7 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
     if let Some(err) = &procs.error {
         lines.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(Th::WARN),
         )));
     }
     if procs.loading {
@@ -1337,7 +1344,7 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
     lines.push(Line::from(Span::styled(
         format!("{:<7} {:<8} {:>5} {:>5}  COMMAND", "PID", "USER", "%CPU", "%MEM"),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(Th::FG_DIM)
             .add_modifier(Modifier::BOLD),
     )));
 
@@ -1350,11 +1357,11 @@ fn draw_processes(frame: &mut Frame<'_>, area: Rect, focused: bool, procs: &Proc
         );
         let style = if idx == procs.selected && focused {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else if idx == procs.selected {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(Th::ACCENT)
         } else {
             Style::default()
         };
@@ -1378,13 +1385,13 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         " DOCK ",
         if dock_hot {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::WARN)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Color::DarkGray)
-                .bg(Color::Rgb(24, 28, 36))
+                .fg(Th::FG_DIM)
+                .bg(Th::CHROME)
                 .add_modifier(Modifier::BOLD)
         },
     )];
@@ -1392,13 +1399,13 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         let active = model.screen == ScreenKind::Desktop && focused == *app;
         let style = if active {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(Th::ON_ACCENT)
+                .bg(Th::ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Color::Gray)
-                .bg(Color::Rgb(24, 28, 36))
+                .fg(Th::FG_MUTED)
+                .bg(Th::CHROME)
         };
         spans.push(Span::styled(
             format!(" {} ", app.label().to_ascii_uppercase()),
@@ -1410,12 +1417,12 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         spans.push(Span::styled(
             format!(" [clipboard:{}] ", model.clipboard_label),
             Style::default()
-                .fg(Color::Magenta)
-                .bg(Color::Rgb(24, 28, 36)),
+                .fg(Th::INFO)
+                .bg(Th::CHROME),
         ));
     }
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(24, 28, 36))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Th::CHROME)),
         area,
     );
 }
@@ -1428,13 +1435,13 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
     let line = Line::from(vec![
         Span::styled(
             format!(" {} ", model.status),
-            Style::default().fg(Color::White),
+            Style::default().fg(Th::FG),
         ),
-        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(help, Style::default().fg(Color::DarkGray)),
+        Span::styled("│ ", Style::default().fg(Th::FG_DIM)),
+        Span::styled(help, Style::default().fg(Th::FG_DIM)),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Black)),
+        Paragraph::new(line).style(Style::default().bg(Th::CHROME)),
         area,
     );
 }

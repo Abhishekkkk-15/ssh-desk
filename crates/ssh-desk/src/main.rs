@@ -7,6 +7,7 @@ mod files;
 mod hit;
 mod hostform;
 mod term;
+mod theme;
 mod transfers;
 mod ui;
 

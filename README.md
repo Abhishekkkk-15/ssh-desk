@@ -8,6 +8,7 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 Hardening in progress toward production:
 
+- **Tokyo Night–inspired palette** (soft blues / muted greens — no neon on pitch black)
 - **VT100 terminal emulator** (colors, cursor, resize) via `vt100`
 - **known_hosts** TOFU at `~/.config/ssh-desk/known_hosts` (reject on key change)
 - **Recursive** upload / download / remote copy for directories
