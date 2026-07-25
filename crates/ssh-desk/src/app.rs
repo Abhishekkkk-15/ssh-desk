@@ -1842,6 +1842,11 @@ impl App {
             self.open_launcher();
             return Ok(());
         }
+        // Paste clipboard → local Downloads (desktop-wide; terminals often steal Ctrl+Shift+V).
+        if ctrl && shift && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+            self.clipboard_paste_to_local().await?;
+            return Ok(());
+        }
         // Quit app (saves open host + deck, or clears if launcher-only).
         if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             self.request_quit();
@@ -2232,33 +2237,36 @@ impl App {
 
     async fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('u') | KeyCode::Char('U')) => {
                 self.begin_upload_prompt();
                 return Ok(());
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('d') | KeyCode::Char('D')) => {
                 self.begin_download_prompt();
                 return Ok(());
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => {
                 self.clipboard_copy_remote();
                 return Ok(());
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('x') | KeyCode::Char('X')) => {
                 self.clipboard_cut_remote();
                 return Ok(());
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
-                self.clipboard_paste_into_remote().await?;
-                return Ok(());
-            }
-            (mods, KeyCode::Char('v'))
+            // Ctrl+Shift+V is also handled at desktop level; keep here for Files focus.
+            (mods, KeyCode::Char('v') | KeyCode::Char('V'))
                 if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
             {
                 self.clipboard_paste_to_local().await?;
                 return Ok(());
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+            (mods, KeyCode::Char('v') | KeyCode::Char('V'))
+                if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::SHIFT) =>
+            {
+                self.clipboard_paste_into_remote().await?;
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('l') | KeyCode::Char('L')) => {
                 self.path_prompt = Some(PathPrompt::copy_local());
                 self.status = "copy local · pick a file for the clipboard".into();
                 return Ok(());
@@ -2266,6 +2274,12 @@ impl App {
             _ => {}
         }
         match key.code {
+            // Reliable fallback when the terminal steals Ctrl+Shift+V.
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.clipboard_paste_to_local().await?;
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(s) = self.slot_mut() {
                     s.files.move_up();
@@ -2390,7 +2404,7 @@ impl App {
             .collect();
         let n = files.len();
         self.clipboard.set_files(files, FileOp::Copy);
-        self.status = format!("copied {n} item(s) · Ctrl+V paste here · Ctrl+Shift+V to local");
+        self.status = format!("copied {n} item(s) · Ctrl+V remote · y / Ctrl+Shift+V to local");
     }
 
     fn clipboard_cut_remote(&mut self) {
@@ -2690,11 +2704,15 @@ impl App {
             return Ok(());
         };
         let op = self.clipboard.file_op().unwrap_or(FileOp::Copy);
-        let entries = self.clipboard.files().to_vec();
+        let mut entries = self.clipboard.files().to_vec();
         if entries.is_empty() {
-            // Fall back: download current selection via prompt
-            self.begin_download_prompt();
-            return Ok(());
+            // Convenience: treat current Files selection as the clipboard.
+            self.clipboard_copy_remote();
+            entries = self.clipboard.files().to_vec();
+            if entries.is_empty() {
+                self.status = "nothing to download · select a remote file first".into();
+                return Ok(());
+            }
         }
 
         let dest_dir = dirs::download_dir()
@@ -2702,6 +2720,7 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let mut queued = 0usize;
+        let mut last_err: Option<String> = None;
         for entry in entries {
             match entry.location {
                 FileLocation::Remote { host_id: src, path } => {
@@ -2718,7 +2737,7 @@ impl App {
                         .await
                     {
                         Ok(_) => queued += 1,
-                        Err(e) => self.status = format!("download failed · {e}"),
+                        Err(e) => last_err = Some(e.to_string()),
                     }
                 }
                 FileLocation::Local { .. } => {
@@ -2726,7 +2745,7 @@ impl App {
                 }
             }
         }
-        if op == FileOp::Cut {
+        if op == FileOp::Cut && queued > 0 {
             self.clipboard.clear_files();
         }
         if queued > 0 {
@@ -2741,6 +2760,12 @@ impl App {
                     desktop.tree.set_focus(tid);
                 }
             }
+        } else if let Some(e) = last_err {
+            self.note_status(
+                DiagLevel::Error,
+                format!("download failed · {e}"),
+                format!("paste-to-local · {e}"),
+            );
         }
         Ok(())
     }

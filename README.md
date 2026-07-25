@@ -242,7 +242,7 @@ Closed apps appear dimmed as `[FILES]` on the dock; open ones without brackets; 
 | `Ctrl+C` | Copy marked/focused remote entries |
 | `Ctrl+X` | Cut marked/focused remote entries |
 | `Ctrl+V` | Paste into remote cwd (Files focused) |
-| `Ctrl+Shift+V` | Paste clipboard files to a local path |
+| `Ctrl+Shift+V` or `y` | Download clipboard (or selection) to local Downloads |
 | `Ctrl+L` | Pick a local path onto the clipboard |
 
 ### Drag & drop
@@ -315,6 +315,7 @@ Overwrite existing targets: confirm dialog (Yes / No).
 | `r` | Refresh listing |
 | `Ctrl+U` / `Ctrl+D` | Upload / download prompts |
 | `Ctrl+C` `Ctrl+X` `Ctrl+V` `Ctrl+Shift+V` `Ctrl+L` | Clipboard (see above) |
+| `y` | Download clipboard/selection → local Downloads (fallback if terminal steals Ctrl+Shift+V) |
 
 ### Transfers
 
