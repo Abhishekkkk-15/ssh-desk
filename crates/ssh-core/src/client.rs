@@ -1160,38 +1160,7 @@ async fn authenticate(
 ) -> Result<(), CoreError> {
     match &profile.auth {
         AuthMethod::Agent => {
-            let mut agent = russh::keys::agent::client::AgentClient::connect_env()
-                .await
-                .map_err(|e| CoreError::Auth(format!("ssh-agent: {e}")))?;
-            let identities = agent
-                .request_identities()
-                .await
-                .map_err(|e| CoreError::Auth(format!("agent identities: {e}")))?;
-            if identities.is_empty() {
-                return Err(CoreError::Auth("ssh-agent has no identities".into()));
-            }
-            let hash_alg = handle
-                .best_supported_rsa_hash()
-                .await
-                .map_err(|e| CoreError::Auth(e.to_string()))?
-                .flatten();
-            let mut ok = false;
-            for key in identities {
-                match handle
-                    .authenticate_publickey_with(&profile.user, key, hash_alg, &mut agent)
-                    .await
-                {
-                    Ok(result) if result.success() => {
-                        ok = true;
-                        break;
-                    }
-                    Ok(_) => continue,
-                    Err(e) => warn!("agent key failed: {e}"),
-                }
-            }
-            if !ok {
-                return Err(CoreError::Auth("all agent keys rejected".into()));
-            }
+            auth_with_ssh_agent(handle, &profile.user).await?;
         }
         AuthMethod::PrivateKey { path, .. } => {
             auth_private_key(handle, &profile.user, path).await?;
@@ -1212,6 +1181,82 @@ async fn authenticate(
         }
     }
     Ok(())
+}
+
+/// Connect to the platform SSH agent and try each identity.
+async fn auth_with_ssh_agent(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+) -> Result<(), CoreError> {
+    #[cfg(unix)]
+    {
+        let mut agent = russh::keys::agent::client::AgentClient::connect_env()
+            .await
+            .map_err(|e| CoreError::Auth(format!("ssh-agent: {e}")))?;
+        try_agent_identities(handle, user, &mut agent).await
+    }
+    #[cfg(windows)]
+    {
+        // Windows OpenSSH agent listens on a fixed named pipe (no SSH_AUTH_SOCK).
+        let mut agent = russh::keys::agent::client::AgentClient::connect_named_pipe(
+            r"\\.\pipe\openssh-ssh-agent",
+        )
+        .await
+        .map_err(|e| {
+            CoreError::Auth(format!(
+                "ssh-agent (\\\\.\\pipe\\openssh-ssh-agent): {e} · start the OpenSSH Authentication Agent service, or use key/password auth"
+            ))
+        })?;
+        try_agent_identities(handle, user, &mut agent).await
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (handle, user);
+        Err(CoreError::Auth(
+            "ssh-agent is not supported on this platform · use private key or password auth".into(),
+        ))
+    }
+}
+
+async fn try_agent_identities<S>(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+) -> Result<(), CoreError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|e| CoreError::Auth(format!("agent identities: {e}")))?;
+    if identities.is_empty() {
+        return Err(CoreError::Auth("ssh-agent has no identities".into()));
+    }
+    let hash_alg = handle
+        .best_supported_rsa_hash()
+        .await
+        .map_err(|e| CoreError::Auth(e.to_string()))?
+        .flatten();
+    let mut ok = false;
+    for key in identities {
+        match handle
+            .authenticate_publickey_with(user, key, hash_alg, &mut *agent)
+            .await
+        {
+            Ok(result) if result.success() => {
+                ok = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) => warn!("agent key failed: {e}"),
+        }
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(CoreError::Auth("all agent keys rejected".into()))
+    }
 }
 
 async fn auth_private_key(
