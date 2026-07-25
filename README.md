@@ -8,7 +8,46 @@ Connect to a host, then work in a tiled desktop of panes: shell, files, viewer/e
 
 ## Install
 
-Requires a recent Rust toolchain (`rustup`).
+### One-liner (recommended)
+
+**Linux / macOS / WSL**
+
+Downloads the correct binary for your OS/CPU from [GitHub Releases](https://github.com/Abhishekkkk-15/ssh-desk/releases) into `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Abhishekkkk-15/ssh-desk/main/scripts/install.sh | bash
+```
+
+Then ensure `~/.local/bin` is on your `PATH` (the script prints the line if needed):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+ssh-desk
+```
+
+Pin a version or install location:
+
+```bash
+SSH_DESK_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Abhishekkkk-15/ssh-desk/main/scripts/install.sh | bash
+SSH_DESK_INSTALL_DIR=/usr/local/bin curl -fsSL … | bash   # may need sudo
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/Abhishekkkk-15/ssh-desk/main/scripts/install.ps1 | iex
+```
+
+Installs `ssh-desk.exe` to `%LOCALAPPDATA%\ssh-desk\bin` and adds that folder to your **User PATH**. Open a **new** terminal, then:
+
+```powershell
+ssh-desk
+ssh-desk --version
+```
+
+Prebuilt Windows assets are **x64** (`x86_64-pc-windows-msvc`). ARM64 Windows: use WSL or build from source for now.
+
+### From source (Rust / rustup)
 
 ```bash
 git clone https://github.com/Abhishekkkk-15/ssh-desk.git
@@ -16,14 +55,17 @@ cd ssh-desk
 cargo install --path crates/ssh-desk
 ```
 
-Or run without installing:
+### Publish a release (maintainers)
 
 ```bash
-cargo run -p ssh-desk --release
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
+That triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds Linux / macOS / Windows archives and attaches them to the GitHub Release.
+
 ```bash
-ssh-desk --version   # 0.1.0
+ssh-desk --version
 ssh-desk --help
 ```
 
