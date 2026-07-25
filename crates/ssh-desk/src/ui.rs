@@ -394,6 +394,7 @@ fn draw_app_body(
     focused: bool,
     model: &UiFrame<'_>,
 ) {
+    frame.render_widget(Clear, area); // Wipe pane canvas to prevent layout overlap/residual text leaks
     match app {
         AppKind::Terminal => {
             let text = if model.term_buffer.is_empty() {
@@ -414,9 +415,7 @@ fn draw_app_body(
         AppKind::Transfers => draw_transfers(frame, area, focused, model.transfers),
         AppKind::Viewer => draw_viewer(frame, area, model.viewer),
         AppKind::Editor => draw_editor(frame, area, focused, model.editor),
-        AppKind::Launcher => {
-            frame.render_widget(Clear, area);
-        }
+        AppKind::Launcher => {}
     }
 }
 
