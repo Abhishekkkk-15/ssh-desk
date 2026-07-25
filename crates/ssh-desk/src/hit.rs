@@ -129,16 +129,18 @@ fn collect_panes(
 ) {
     match node {
         PaneNode::Leaf { id, app } => {
+            // Match draw_pane_leaf: border inset, then 1-row header strip, then body.
             let block_inner = inset_border(area);
+            let content = inset_header_strip(block_inner);
             out.push(PaneHit {
                 id: *id,
                 app: *app,
                 area,
-                inner: block_inner,
+                inner: content,
             });
             match app {
-                AppKind::Files => *files_inner = Some(block_inner),
-                AppKind::Transfers => *transfers = Some(block_inner),
+                AppKind::Files => *files_inner = Some(content),
+                AppKind::Transfers => *transfers = Some(content),
                 _ => {}
             }
         }
@@ -173,6 +175,24 @@ fn inset_border(area: Rect) -> Rect {
         y: area.y + 1,
         width: area.width - 2,
         height: area.height - 2,
+    }
+}
+
+/// Skip the 1-row pane header strip under the border.
+fn inset_header_strip(inner: Rect) -> Rect {
+    if inner.height <= 1 {
+        return Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 0,
+        };
+    }
+    Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height - 1,
     }
 }
 

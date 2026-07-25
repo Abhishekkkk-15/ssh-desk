@@ -138,30 +138,58 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
-    let mut spans = vec![Span::styled(
-        " ssh-desk ",
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![
+        Span::styled(
+            " ssh-desk ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("▌", Style::default().fg(Color::Cyan).bg(Color::Rgb(24, 28, 36))),
+    ];
 
     match model.screen {
         ScreenKind::Launcher => {
             spans.push(Span::styled(
-                " remote OS shell  ·  launcher",
-                Style::default().fg(Color::Gray),
+                " LAUNCHER ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(Color::Rgb(24, 28, 36))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                " remote OS shell",
+                Style::default()
+                    .fg(Color::Gray)
+                    .bg(Color::Rgb(24, 28, 36)),
             ));
         }
         ScreenKind::Desktop => {
             if model.sessions.len() <= 1 {
                 let name = model.desktop.map(|d| d.title.as_str()).unwrap_or("session");
                 spans.push(Span::styled(
-                    format!(" desktop · {name}"),
-                    Style::default().fg(Color::Gray),
+                    " DESKTOP ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Rgb(24, 28, 36))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {name} "),
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Rgb(24, 28, 36))
+                        .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                spans.push(Span::styled(" ", Style::default()));
+                spans.push(Span::styled(
+                    " SESSIONS ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Rgb(24, 28, 36))
+                        .add_modifier(Modifier::BOLD),
+                ));
                 for (i, name) in model.sessions.iter().enumerate() {
                     let active = i == model.active_session_idx;
                     let label = format!(" {}:{} ", i + 1, name);
@@ -171,27 +199,29 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                             .bg(Color::Green)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .bg(Color::Rgb(24, 28, 36))
                     };
                     spans.push(Span::styled(label, style));
-                    spans.push(Span::raw(" "));
                 }
 
-                // Only render keyboard help hints if they fit in the terminal area width
                 let total_chars: usize = spans.iter().map(|s| s.content.chars().count()).sum();
                 if area.width as usize > total_chars + 36 {
                     spans.push(Span::styled(
-                        "│ Ctrl+Tab switch · F8 list · Ctrl+W close ",
-                        Style::default().fg(Color::DarkGray),
+                        " │ Ctrl+Tab · F8 · Ctrl+W ",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .bg(Color::Rgb(24, 28, 36)),
                     ));
                 }
             }
         }
     }
 
+    // Fill remaining title bar so the strip reads as one solid band.
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Black)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(24, 28, 36))),
         area,
     );
 }
@@ -302,13 +332,7 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
 fn draw_desktop(frame: &mut Frame<'_>, area: Rect, desktop: &Desktop, model: &UiFrame<'_>) {
     if let Some(app) = model.fullscreen_app {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} [fullscreen] ", app.label()))
-            .border_style(Style::default().fg(Color::Cyan));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        draw_app_body(frame, inner, app, true, model);
+        draw_pane_leaf(frame, area, app, true, false, model);
     } else {
         draw_pane(frame, area, desktop.tree.root_node(), desktop, model);
     }
@@ -325,57 +349,7 @@ fn draw_pane(
         PaneNode::Leaf { id, app } => {
             let focused = *id == desktop.tree.focused();
             let drop_hot = pane_is_drop_hot(*app, model.drop_target);
-            let border = if drop_hot {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else if focused {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let title = match app {
-                AppKind::Files => format!(
-                    " files {}{} ",
-                    model.files.cwd_display(),
-                    if focused { " ●" } else { "" }
-                ),
-                AppKind::Viewer => format!(
-                    " viewer{}{} ",
-                    if model.viewer.is_open() {
-                        format!(" · {}", model.viewer.title)
-                    } else {
-                        String::new()
-                    },
-                    if focused { " ●" } else { "" }
-                ),
-                AppKind::Editor => format!(
-                    " editor{}{}{} ",
-                    if model.editor.is_open() {
-                        format!(" · {}", model.editor.title)
-                    } else {
-                        String::new()
-                    },
-                    if model.editor.dirty { " *" } else { "" },
-                    if focused { " ●" } else { "" }
-                ),
-                AppKind::Processes => format!(
-                    " processes{}{} ",
-                    if model.processes.online {
-                        format!(" · {}", model.processes.rows.len())
-                    } else {
-                        " · demo".into()
-                    },
-                    if focused { " ●" } else { "" }
-                ),
-                _ => format!(" {}{} ", app.label(), if focused { " ●" } else { "" }),
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border);
-            let inner = block.inner(area);
-            frame.render_widget(Clear, area); // Wipe outer block area completely first
-            frame.render_widget(block, area);
-            draw_app_body(frame, inner, *app, focused, model);
+            draw_pane_leaf(frame, area, *app, focused, drop_hot, model);
         }
         PaneNode::Split(split) => {
             let (constraint_a, constraint_b) = ratio_constraints(split.ratio);
@@ -391,6 +365,117 @@ fn draw_pane(
             draw_pane(frame, chunks[1], &split.second, desktop, model);
         }
     }
+}
+
+fn draw_pane_leaf(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: AppKind,
+    focused: bool,
+    drop_hot: bool,
+    model: &UiFrame<'_>,
+) {
+    let border = if drop_hot {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Border only — title lives in a dedicated header strip below.
+    let block = Block::default().borders(Borders::ALL).border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    draw_pane_header(frame, chunks[0], app, focused, drop_hot, model);
+    if chunks[1].height > 0 {
+        draw_app_body(frame, chunks[1], app, focused, model);
+    }
+}
+
+fn draw_pane_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: AppKind,
+    focused: bool,
+    drop_hot: bool,
+    model: &UiFrame<'_>,
+) {
+    let (name, detail) = pane_header_parts(app, model);
+    let focus_mark = if focused { " ●" } else { "" };
+
+    let (fg, bg) = if drop_hot {
+        (Color::Black, Color::Yellow)
+    } else if focused {
+        (Color::Black, Color::Cyan)
+    } else {
+        (Color::Gray, Color::Rgb(32, 36, 44))
+    };
+
+    let mut spans = vec![Span::styled(
+        format!(" {name}{focus_mark} "),
+        Style::default()
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if !detail.is_empty() {
+        spans.push(Span::styled(
+            format!(" {detail} "),
+            Style::default().fg(Color::DarkGray).bg(bg),
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
+        area,
+    );
+}
+
+fn pane_header_parts(app: AppKind, model: &UiFrame<'_>) -> (String, String) {
+    let name = app.label().to_ascii_uppercase();
+    let detail = match app {
+        AppKind::Files => model.files.cwd_display(),
+        AppKind::Viewer if model.viewer.is_open() => model.viewer.title.clone(),
+        AppKind::Editor if model.editor.is_open() => {
+            let dirty = if model.editor.dirty { "*" } else { "" };
+            format!("{}{dirty}", model.editor.title)
+        }
+        AppKind::Processes => {
+            if model.processes.online {
+                format!("{} procs", model.processes.rows.len())
+            } else {
+                "demo".into()
+            }
+        }
+        AppKind::Transfers => {
+            let n = model.transfers.jobs.len();
+            if n == 0 {
+                String::new()
+            } else {
+                format!("{n} jobs")
+            }
+        }
+        AppKind::Terminal if model.fullscreen_app == Some(AppKind::Terminal) => {
+            "fullscreen".into()
+        }
+        _ => String::new(),
+    };
+    (name, detail)
 }
 
 fn pane_is_drop_hot(app: AppKind, target: Option<&DropTarget>) -> bool {
@@ -1290,14 +1375,17 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
 
     let dock_hot = matches!(model.drop_target, Some(DropTarget::TransferDock));
     let mut spans = vec![Span::styled(
-        " dock ",
+        " DOCK ",
         if dock_hot {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default()
+                .fg(Color::DarkGray)
+                .bg(Color::Rgb(24, 28, 36))
+                .add_modifier(Modifier::BOLD)
         },
     )];
     for app in AppKind::all_dock() {
@@ -1308,18 +1396,28 @@ fn draw_dock(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default()
+                .fg(Color::Gray)
+                .bg(Color::Rgb(24, 28, 36))
         };
-        spans.push(Span::styled(format!(" {} ", app.label()), style));
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(" {} ", app.label().to_ascii_uppercase()),
+            style,
+        ));
+        spans.push(Span::raw(""));
     }
     if model.clipboard_has_files {
         spans.push(Span::styled(
             format!(" [clipboard:{}] ", model.clipboard_label),
-            Style::default().fg(Color::Magenta),
+            Style::default()
+                .fg(Color::Magenta)
+                .bg(Color::Rgb(24, 28, 36)),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(24, 28, 36))),
+        area,
+    );
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
