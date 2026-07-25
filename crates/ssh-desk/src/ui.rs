@@ -15,6 +15,7 @@ use ssh_wm::{AppKind, Desktop, Direction as SplitDir, PaneNode};
 use crate::apps::{EditorState, ProcessesState};
 use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{FilesRow, FilesState, ViewerKind, ViewerState};
+use crate::files_prompt::FilesPrompt;
 use crate::hostform::{HostField, HostForm, VaultUnlockPrompt};
 use crate::term::TermEmulator;
 use crate::transfers::{PathPrompt, PathPromptKind, TransfersUi};
@@ -53,6 +54,7 @@ pub struct UiFrame<'a> {
     pub drop_target: Option<&'a DropTarget>,
     pub os_drop: Option<&'a OsDropOffer>,
     pub overwrite_prompt: Option<&'a OverwritePrompt>,
+    pub files_prompt: Option<&'a FilesPrompt>,
     pub diagnostics: &'a DiagnosticsState,
 }
 
@@ -84,6 +86,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
         }
         if let Some(oprompt) = model.overwrite_prompt {
             draw_overwrite_confirm(frame, area, oprompt);
+        }
+        if let Some(fprompt) = model.files_prompt {
+            draw_files_prompt(frame, area, fprompt);
         }
         if model.diagnostics.open {
             draw_diagnostics(frame, area, model.diagnostics);
@@ -132,6 +137,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     }
     if let Some(oprompt) = model.overwrite_prompt {
         draw_overwrite_confirm(frame, area, oprompt);
+    }
+    if let Some(fprompt) = model.files_prompt {
+        draw_files_prompt(frame, area, fprompt);
     }
     if model.diagnostics.open {
         draw_diagnostics(frame, area, model.diagnostics);
@@ -321,8 +329,8 @@ fn draw_launcher(frame: &mut Frame<'_>, area: Rect, model: &UiFrame<'_>) {
         Line::from("Auth: ssh-agent · private key · password"),
         Line::from(""),
         Line::from("After connect: tiled desktop with SFTP files."),
-        Line::from("  F2 files · Enter open · e edit · F4 procs · F7 editor"),
-        Line::from("Esc returns here from a session."),
+        Line::from("  F2 files · a mkdir · R rename · d delete · e edit"),
+        Line::from("  F4 procs · F7 editor · Esc returns here"),
     ])
     .block(
         Block::default()
@@ -544,8 +552,23 @@ fn draw_files(
         lines.push(Line::from("loading…"));
     }
 
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {:<10} {:>8}  {:<16}  {}",
+            "MODE", "SIZE", "MODIFIED", "NAME"
+        ),
+        Style::default()
+            .fg(Th::FG_DIM)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let prefix = lines.len();
+    let help_reserve = if focused { 1usize } else { 0 };
     let rows = files.rows();
-    let visible = area.height as usize;
+    let visible = area
+        .height
+        .saturating_sub(prefix as u16)
+        .saturating_sub(help_reserve as u16) as usize;
     let start = files.selected.saturating_sub(visible.saturating_sub(1));
 
     for (idx, row) in rows.iter().enumerate().skip(start).take(visible) {
@@ -556,21 +579,25 @@ fn draw_files(
                     .parent()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                ("../".to_string(), Some(p), true)
+                (
+                    format!("  {:<10} {:>8}  {:<16}  ../", "", "—", "—"),
+                    Some(p),
+                    true,
+                )
             }
             FilesRow::Entry(i) => files
                 .entries
                 .get(*i)
                 .map(|e| {
                     let mark = if files.is_marked(*i) { "* " } else { "  " };
-                    let mut name = e.display_name();
-                    if let Some(sz) = e.size {
-                        if !e.is_dir {
-                            name = format!("{name}  ({sz})");
-                        }
-                    }
                     (
-                        format!("{mark}{name}"),
+                        format!(
+                            "{mark}{:<10} {:>8}  {:<16}  {}",
+                            e.mode_string(),
+                            e.size_label(),
+                            e.mtime_label(),
+                            e.display_name()
+                        ),
                         Some(e.path.clone()),
                         e.is_dir,
                     )
@@ -592,29 +619,25 @@ fn draw_files(
         } else if selected {
             Style::default().fg(Th::ACCENT)
         } else if is_dir {
-            Style::default().fg(Th::WARN)
+            Style::default().fg(Th::ACCENT_2)
         } else {
-            Style::default()
+            Style::default().fg(Th::FG)
         };
-        let marker = if is_drop {
-            "↳ "
-        } else if selected {
-            "› "
-        } else {
-            "  "
-        };
-        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
+        lines.push(Line::from(Span::styled(label, style)));
     }
 
-    if rows.is_empty() && !files.loading {
-        lines.push(Line::from("(empty directory)"));
+    if rows.is_empty() && files.error.is_none() && !files.loading {
+        lines.push(Line::from(Span::styled(
+            "  (empty)  ·  a mkdir · R rename · d delete",
+            Style::default().fg(Th::FG_DIM),
+        )));
     }
 
     if focused {
         let help = if files.search_query.is_some() {
             "searching · Backspace edit · Esc cancel query · Enter lock"
         } else {
-            "/ search · drag files · Shift+drop move · Space mark · Ctrl+C/X/V"
+            "/ search · a mkdir · R rename · d delete · Space mark · Ctrl+C/X/V"
         };
         lines.push(Line::from(Span::styled(
             help,
@@ -1153,6 +1176,121 @@ fn draw_overwrite_confirm(frame: &mut Frame<'_>, area: Rect, prompt: &OverwriteP
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_files_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &FilesPrompt) {
+    let width = area.width.min(64).max(40);
+    let height = match prompt {
+        FilesPrompt::Delete { names, .. } => (9 + names.len().min(4) as u16).min(area.height).max(8),
+        _ => 9u16.min(area.height).max(7),
+    };
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let border_fg = match prompt {
+        FilesPrompt::Delete { .. } => Th::ERR,
+        _ => Th::ACCENT,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", prompt.title()))
+        .border_style(Style::default().fg(border_fg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match prompt {
+        FilesPrompt::Mkdir { buffer, error } => {
+            lines.push(Line::from(Span::styled(
+                "Folder name",
+                Style::default().fg(Th::FG_MUTED),
+            )));
+            lines.push(Line::from(format!("  {buffer}█")));
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Th::ERR),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter create · Esc cancel",
+                Style::default().fg(Th::FG_DIM),
+            )));
+        }
+        FilesPrompt::Rename { buffer, error, .. } => {
+            lines.push(Line::from(Span::styled(
+                "New name",
+                Style::default().fg(Th::FG_MUTED),
+            )));
+            lines.push(Line::from(format!("  {buffer}█")));
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Th::ERR),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter rename · Esc cancel",
+                Style::default().fg(Th::FG_DIM),
+            )));
+        }
+        FilesPrompt::Delete {
+            names,
+            selected,
+            ..
+        } => {
+            lines.push(Line::from(Span::styled(
+                "Permanently delete the following?",
+                Style::default().fg(Th::ERR).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for (i, name) in names.iter().take(4).enumerate() {
+                lines.push(Line::from(format!("  {}. {name}", i + 1)));
+            }
+            if names.len() > 4 {
+                lines.push(Line::from(format!("  … +{} more", names.len() - 4)));
+            }
+            lines.push(Line::from(""));
+
+            let yes_style = if *selected == 0 {
+                Style::default()
+                    .fg(Th::ON_ACCENT)
+                    .bg(Th::ERR)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Th::FG_MUTED)
+            };
+            let no_style = if *selected == 1 {
+                Style::default()
+                    .fg(Th::ON_ACCENT)
+                    .bg(Th::FG_DIM)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Th::FG_MUTED)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(" Yes, Delete ", yes_style),
+                Span::raw("  "),
+                Span::styled(" No, Cancel ", no_style),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "Enter confirm · Tab switch · Esc cancel",
+                Style::default().fg(Th::FG_DIM),
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
 fn draw_drag_ghost(frame: &mut Frame<'_>, drag: &DragSession, target: Option<&DropTarget>) {
     let label = match &drag.payload {

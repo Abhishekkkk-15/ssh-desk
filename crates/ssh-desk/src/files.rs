@@ -42,19 +42,28 @@ impl FilesState {
                 name: "Documents".into(),
                 path: cwd.join("Documents"),
                 is_dir: true,
+                is_symlink: false,
                 size: None,
+                permissions: Some(0o040755),
+                mtime: None,
             },
             RemoteEntry {
                 name: "notes.txt".into(),
                 path: cwd.join("notes.txt"),
                 is_dir: false,
+                is_symlink: false,
                 size: Some(42),
+                permissions: Some(0o100644),
+                mtime: None,
             },
             RemoteEntry {
                 name: "readme.md".into(),
                 path: cwd.join("readme.md"),
                 is_dir: false,
+                is_symlink: false,
                 size: Some(120),
+                permissions: Some(0o100644),
+                mtime: None,
             },
         ];
         Self {

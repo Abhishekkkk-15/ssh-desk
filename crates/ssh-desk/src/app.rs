@@ -1,7 +1,7 @@
 //! Application state machine: launcher ↔ desktop session.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use crate::apps::{EditorState, ProcessesState};
 use crate::diagnostics::{DiagLevel, DiagnosticsState};
 use crate::files::{resolve_open_path, FilesRow, FilesState, ViewerState};
+use crate::files_prompt::FilesPrompt;
 use crate::hit::{self, FrameGeo};
 use crate::hostform::{HostForm, VaultUnlockPrompt};
 use crate::term::TermEmulator;
@@ -123,6 +124,7 @@ pub struct App {
     should_quit: bool,
     connect_in_flight: bool,
     overwrite_prompt: Option<OverwritePrompt>,
+    files_prompt: Option<FilesPrompt>,
     diagnostics: DiagnosticsState,
 }
 
@@ -174,6 +176,7 @@ impl App {
             should_quit: false,
             connect_in_flight: false,
             overwrite_prompt: None,
+            files_prompt: None,
             diagnostics: DiagnosticsState::default(),
         }
     }
@@ -676,6 +679,10 @@ impl App {
             self.handle_overwrite_prompt_key(key).await?;
             return Ok(());
         }
+        if self.files_prompt.is_some() {
+            self.handle_files_prompt_key(key).await?;
+            return Ok(());
+        }
         if self.path_prompt.is_some() {
             self.handle_path_prompt_key(key).await?;
             return Ok(());
@@ -771,6 +778,215 @@ impl App {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn begin_rename_prompt(&mut self) {
+        if !self.slot().map(|s| s.files.online).unwrap_or(false) {
+            self.status = "rename needs a live SFTP session".into();
+            return;
+        }
+        let Some(row) = self.slot().and_then(|s| s.files.selected_row()) else {
+            return;
+        };
+        let FilesRow::Entry(i) = row else {
+            self.status = "cannot rename ..".into();
+            return;
+        };
+        let Some(entry) = self.slot().and_then(|s| s.files.entries.get(i).cloned()) else {
+            return;
+        };
+        self.files_prompt = Some(FilesPrompt::rename(entry.path.clone(), entry.name.clone()));
+        self.status = "rename · edit name · Enter · Esc".into();
+    }
+
+    fn begin_delete_prompt(&mut self) {
+        if !self.slot().map(|s| s.files.online).unwrap_or(false) {
+            self.status = "delete needs a live SFTP session".into();
+            return;
+        }
+        let targets: Vec<(PathBuf, bool, String)> = self
+            .slot()
+            .map(|s| {
+                s.files
+                    .clipboard_targets()
+                    .into_iter()
+                    .map(|e| (e.path.clone(), e.is_dir, e.display_name()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if targets.is_empty() {
+            self.status = "nothing to delete".into();
+            return;
+        }
+        let names: Vec<String> = targets.iter().map(|(_, _, n)| n.clone()).collect();
+        let paths: Vec<PathBuf> = targets.into_iter().map(|(p, _, _)| p).collect();
+        self.files_prompt = Some(FilesPrompt::delete(names, paths));
+        self.status = "delete · confirm · Enter · Esc".into();
+    }
+
+    async fn handle_files_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.files_prompt.is_none() {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.files_prompt = None;
+                self.status = "cancelled".into();
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let is_delete = matches!(self.files_prompt, Some(FilesPrompt::Delete { .. }));
+        if is_delete {
+            let Some(FilesPrompt::Delete { selected, .. }) = self.files_prompt.as_mut() else {
+                return Ok(());
+            };
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => *selected = 0,
+                KeyCode::Right | KeyCode::Char('l') => *selected = 1,
+                KeyCode::Tab => *selected = 1 - *selected,
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    *selected = 0;
+                    self.submit_files_prompt().await?;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.files_prompt = None;
+                    self.status = "delete cancelled".into();
+                }
+                KeyCode::Enter => self.submit_files_prompt().await?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Enter => self.submit_files_prompt().await?,
+            KeyCode::Backspace => {
+                if let Some(buf) = self.files_prompt.as_mut().and_then(|p| p.buffer_mut()) {
+                    buf.pop();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if c == '/' || c == '\0' {
+                    return Ok(());
+                }
+                if let Some(buf) = self.files_prompt.as_mut().and_then(|p| p.buffer_mut()) {
+                    buf.push(c);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn submit_files_prompt(&mut self) -> Result<()> {
+        let Some(prompt) = self.files_prompt.take() else {
+            return Ok(());
+        };
+        let Some(host_id) = self.active_host_id().map(str::to_owned) else {
+            self.status = "no session".into();
+            return Ok(());
+        };
+        let cwd = self
+            .slot()
+            .map(|s| s.files.cwd.clone())
+            .unwrap_or_else(|| PathBuf::from("/"));
+
+        match prompt {
+            FilesPrompt::Mkdir { buffer, .. } => {
+                let name = buffer.trim();
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    let mut p = FilesPrompt::mkdir();
+                    if let FilesPrompt::Mkdir { buffer: b, .. } = &mut p {
+                        *b = buffer;
+                    }
+                    p.set_error("invalid folder name");
+                    self.files_prompt = Some(p);
+                    self.status = "mkdir · invalid name".into();
+                    return Ok(());
+                }
+                let path = join_remote(&cwd, name);
+                match self.hub.remote_mkdir(&host_id, &path).await {
+                    Ok(()) => {
+                        self.status = format!("created · {name}/");
+                        let _ = self.load_dir(cwd).await;
+                    }
+                    Err(e) => {
+                        let mut p = FilesPrompt::mkdir();
+                        if let FilesPrompt::Mkdir { buffer: b, .. } = &mut p {
+                            *b = buffer;
+                        }
+                        p.set_error(e.to_string());
+                        self.files_prompt = Some(p);
+                        self.note_status(
+                            DiagLevel::Error,
+                            format!("mkdir failed · {e}"),
+                            format!("mkdir failed · {e}"),
+                        );
+                    }
+                }
+            }
+            FilesPrompt::Rename { from, buffer, .. } => {
+                let name = buffer.trim();
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    let mut p = FilesPrompt::rename(from, buffer);
+                    p.set_error("invalid name");
+                    self.files_prompt = Some(p);
+                    return Ok(());
+                }
+                let parent = from.parent().unwrap_or(Path::new("/"));
+                let to = join_remote(parent, name);
+                match self.hub.remote_rename(&host_id, &from, &to).await {
+                    Ok(()) => {
+                        self.status = format!("renamed · {name}");
+                        let _ = self.load_dir(cwd).await;
+                    }
+                    Err(e) => {
+                        let mut p = FilesPrompt::rename(from, buffer);
+                        p.set_error(e.to_string());
+                        self.files_prompt = Some(p);
+                        self.note_status(
+                            DiagLevel::Error,
+                            format!("rename failed · {e}"),
+                            format!("rename failed · {e}"),
+                        );
+                    }
+                }
+            }
+            FilesPrompt::Delete {
+                names,
+                paths,
+                selected,
+            } => {
+                if selected != 0 {
+                    self.status = "delete cancelled".into();
+                    return Ok(());
+                }
+                let mut ok = 0usize;
+                let mut errors = Vec::new();
+                for path in paths {
+                    match self.hub.remote_remove(&host_id, &path).await {
+                        Ok(()) => ok += 1,
+                        Err(e) => errors.push(format!("{}: {e}", path.display())),
+                    }
+                }
+                if errors.is_empty() {
+                    self.status = format!("deleted · {ok} item(s)");
+                } else {
+                    for e in &errors {
+                        self.diagnostics.push(DiagLevel::Error, format!("delete · {e}"));
+                    }
+                    self.status = format!(
+                        "delete incomplete · {ok} ok · {} errors · F9 log",
+                        errors.len()
+                    );
+                }
+                let _ = names;
+                let _ = self.load_dir(cwd).await;
+            }
         }
         Ok(())
     }
@@ -1345,6 +1561,20 @@ impl App {
                 } else {
                     self.status = "files · offline demo (connect for SFTP refresh)".into();
                 }
+            }
+            KeyCode::Char('a') | KeyCode::Char('n') => {
+                if self.slot().map(|s| s.files.online).unwrap_or(false) {
+                    self.files_prompt = Some(FilesPrompt::mkdir());
+                    self.status = "new folder · type name · Enter create · Esc".into();
+                } else {
+                    self.status = "mkdir needs a live SFTP session".into();
+                }
+            }
+            KeyCode::Char('R') => {
+                self.begin_rename_prompt();
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.begin_delete_prompt();
             }
             KeyCode::Char('e') => {
                 let (row, cwd, entries) = self.slot().map(|s| (s.files.selected_row(), s.files.cwd.clone(), s.files.entries.clone())).unwrap_or_default();
@@ -2139,6 +2369,7 @@ impl App {
             drop_target: self.drop_target.as_ref(),
             os_drop: self.os_drop.as_ref(),
             overwrite_prompt: self.overwrite_prompt.as_ref(),
+            files_prompt: self.files_prompt.as_ref(),
             diagnostics: &self.diagnostics,
         }
     }

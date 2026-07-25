@@ -4,6 +4,7 @@ mod app;
 mod apps;
 mod diagnostics;
 mod files;
+mod files_prompt;
 mod hit;
 mod hostform;
 mod term;

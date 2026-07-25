@@ -204,6 +204,8 @@ fn files_row_hits(area: Rect, files: &FilesState) -> Vec<FilesRowHit> {
     if files.loading {
         y_off = y_off.saturating_add(1);
     }
+    // Column header: MODE · SIZE · MODIFIED · NAME
+    y_off = y_off.saturating_add(1);
 
     let rows = files.rows();
     let visible = area.height.saturating_sub(y_off) as usize;

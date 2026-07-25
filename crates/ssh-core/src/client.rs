@@ -371,15 +371,23 @@ impl SessionHub {
             .map_err(|e| CoreError::Sftp(e.to_string()))?;
 
         let mut entries: Vec<RemoteEntry> = dir
-            .map(|entry| {
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                if name == "." || name == ".." {
+                    return None;
+                }
+                let meta = entry.metadata();
                 let is_dir = entry.file_type().is_dir();
-                let size = entry.metadata().size;
-                RemoteEntry {
-                    name: entry.file_name(),
+                let is_symlink = entry.file_type().is_symlink();
+                Some(RemoteEntry {
+                    name,
                     path: PathBuf::from(entry.path()),
                     is_dir,
-                    size,
-                }
+                    is_symlink,
+                    size: meta.size,
+                    permissions: meta.permissions,
+                    mtime: meta.mtime,
+                })
             })
             .collect();
 
@@ -812,11 +820,24 @@ impl SessionHub {
             .map_err(|e| CoreError::Sftp(e.to_string()))
     }
 
+    pub async fn remote_mkdir(&self, host_id: &str, path: &Path) -> Result<(), CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        sftp.create_dir(remote_path_string(path))
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))
+    }
+
     pub async fn remote_remove_file(&self, host_id: &str, path: &Path) -> Result<(), CoreError> {
         let sftp = self.sftp_arc(host_id).await?;
         sftp.remove_file(remote_path_string(path))
             .await
             .map_err(|e| CoreError::Sftp(e.to_string()))
+    }
+
+    /// Remove a remote file or directory tree.
+    pub async fn remote_remove(&self, host_id: &str, path: &Path) -> Result<(), CoreError> {
+        let sftp = self.sftp_arc(host_id).await?;
+        remote_remove_recursive(&sftp, path).await
     }
 
     pub async fn retry_transfer(self: &Arc<Self>, id: TransferId) -> Result<TransferId, CoreError> {
@@ -1439,5 +1460,35 @@ async fn run_remote_copy_tree(
         hub.bump_progress(id, base).await;
     }
     let _ = from_root;
+    Ok(())
+}
+
+async fn remote_remove_recursive(sftp: &SftpSession, path: &Path) -> Result<(), CoreError> {
+    let path_str = remote_path_string(path);
+    let meta = sftp
+        .metadata(&path_str)
+        .await
+        .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    if meta.is_dir() {
+        let entries = sftp
+            .read_dir(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+        for entry in entries {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let child = PathBuf::from(entry.path());
+            Box::pin(remote_remove_recursive(sftp, &child)).await?;
+        }
+        sftp.remove_dir(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    } else {
+        sftp.remove_file(&path_str)
+            .await
+            .map_err(|e| CoreError::Sftp(e.to_string()))?;
+    }
     Ok(())
 }
