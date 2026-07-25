@@ -136,15 +136,27 @@ impl PathPrompt {
 
     pub fn refresh_listing(&mut self) {
         self.browse_entries.clear();
-        if self.browse_cwd != Path::new("/") {
-            if let Some(parent) = self.browse_cwd.parent() {
-                self.browse_entries.push(LocalEntry {
-                    name: "..".into(),
-                    path: parent.to_path_buf(),
-                    is_dir: true,
-                });
-            }
+
+        #[cfg(windows)]
+        if self.is_drives_view() {
+            self.browse_entries = list_windows_drives();
+            self.browse_selected = 0;
+            self.error = if self.browse_entries.is_empty() {
+                Some("no drives found".into())
+            } else {
+                None
+            };
+            return;
         }
+
+        if let Some(parent) = self.parent_browse_path() {
+            self.browse_entries.push(LocalEntry {
+                name: "..".into(),
+                path: parent,
+                is_dir: true,
+            });
+        }
+
         let Ok(rd) = fs::read_dir(&self.browse_cwd) else {
             self.error = Some(format!("cannot read {}", self.browse_cwd.display()));
             return;
@@ -166,6 +178,54 @@ impl PathPrompt {
         self.browse_entries.extend(entries);
         self.browse_selected = 0;
         self.error = None;
+    }
+
+    /// Path for `..` / Backspace, if any. On Windows drive roots, returns the drives view.
+    fn parent_browse_path(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            if self.is_drives_view() {
+                return None;
+            }
+            if is_windows_drive_root(&self.browse_cwd) {
+                return Some(PathBuf::new()); // drives list
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if self.browse_cwd == Path::new("/") {
+                return None;
+            }
+        }
+        self.browse_cwd.parent().map(Path::to_path_buf)
+    }
+
+    /// True when showing the Windows “This PC” drive list (empty browse_cwd).
+    pub fn is_drives_view(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.browse_cwd.as_os_str().is_empty()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub fn browse_label(&self) -> String {
+        if self.is_drives_view() {
+            "This PC (drives)".into()
+        } else {
+            self.browse_cwd.display().to_string()
+        }
+    }
+
+    /// Go up one level (Backspace). On Windows, drive root → drive list.
+    pub fn go_up(&mut self) {
+        if let Some(parent) = self.parent_browse_path() {
+            self.browse_cwd = parent;
+            self.refresh_listing();
+        }
     }
 
     pub fn move_up(&mut self) {
@@ -192,10 +252,10 @@ impl PathPrompt {
         }
     }
 
-    /// Select the focused entry for submit (file or directory). Skips `..`.
+    /// Select the focused entry for submit (file or directory). Skips `..` and drive-list rows.
     pub fn select_selected(&mut self) -> Option<PathBuf> {
         let entry = self.browse_entries.get(self.browse_selected)?.clone();
-        if entry.name == ".." {
+        if entry.name == ".." || self.is_drives_view() {
             return None;
         }
         self.buffer = entry.path.display().to_string();
@@ -209,19 +269,77 @@ impl PathPrompt {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "download.bin".into());
+        if self.is_drives_view() {
+            // Fall back to user Downloads/home rather than an empty path.
+            return dirs::download_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(name);
+        }
         self.browse_cwd.join(name)
     }
 
     pub fn resolved_path(&self) -> PathBuf {
         let raw = self.buffer.trim();
         if raw.is_empty() {
-            return self.browse_cwd.clone();
+            return if self.is_drives_view() {
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+            } else {
+                self.browse_cwd.clone()
+            };
         }
         let p = PathBuf::from(raw);
         if p.is_absolute() {
             p
+        } else if self.is_drives_view() {
+            p
         } else {
             self.browse_cwd.join(p)
         }
+    }
+}
+
+/// `C:\` / `D:\` style roots (no further parent in the path API).
+#[cfg(windows)]
+fn is_windows_drive_root(path: &Path) -> bool {
+    let mut comps = path.components();
+    matches!(
+        (comps.next(), comps.next(), comps.next()),
+        (
+            Some(std::path::Component::Prefix(_)),
+            Some(std::path::Component::RootDir),
+            None
+        )
+    )
+}
+
+#[cfg(windows)]
+fn list_windows_drives() -> Vec<LocalEntry> {
+    let mut drives = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let root = format!("{}:\\", letter as char);
+        let path = PathBuf::from(&root);
+        // `exists` is false for empty removable drives sometimes; try read_dir instead.
+        if fs::read_dir(&path).is_ok() || path.exists() {
+            drives.push(LocalEntry {
+                name: root,
+                path,
+                is_dir: true,
+            });
+        }
+    }
+    drives
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn drive_root_detection() {
+        use super::is_windows_drive_root;
+        use std::path::Path;
+        assert!(is_windows_drive_root(Path::new(r"C:\")));
+        assert!(is_windows_drive_root(Path::new(r"D:/")));
+        assert!(!is_windows_drive_root(Path::new(r"C:\Users")));
     }
 }

@@ -2872,12 +2872,7 @@ impl App {
                     .await?;
             }
             KeyCode::Char('e') | KeyCode::Tab => prompt.editing = true,
-            KeyCode::Backspace => {
-                if let Some(parent) = prompt.browse_cwd.parent() {
-                    prompt.browse_cwd = parent.to_path_buf();
-                    prompt.refresh_listing();
-                }
-            }
+            KeyCode::Backspace => prompt.go_up(),
             _ => {}
         }
         Ok(())

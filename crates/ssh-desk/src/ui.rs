@@ -1003,7 +1003,7 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     );
 
     let mut lines = vec![Line::from(Span::styled(
-        format!("local: {}", prompt.browse_cwd.display()),
+        format!("local: {}", prompt.browse_label()),
         Style::default().fg(Th::warn()),
     ))];
     if let Some(err) = &prompt.error {
@@ -1046,13 +1046,15 @@ fn draw_path_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PathPrompt) {
     frame.render_widget(
         Paragraph::new(match prompt.kind {
             PathPromptKind::Upload => {
-                "Enter open dir · Space/Ctrl+Enter pick file/folder · Tab/e edit · Esc".to_string()
+                "Enter open · Space/Ctrl+Enter pick · Backspace up (drives on Win) · Esc"
+                    .to_string()
             }
             PathPromptKind::Download => {
                 "Enter overwrite file · s save here · Tab/e edit · Esc".to_string()
             }
             PathPromptKind::CopyLocal => {
-                "Enter open dir · Space/Ctrl+Enter copy file/folder · Tab/e edit · Esc".to_string()
+                "Enter open · Space/Ctrl+Enter copy · Backspace up (drives on Win) · Esc"
+                    .to_string()
             }
         }),
         chunks[2],
