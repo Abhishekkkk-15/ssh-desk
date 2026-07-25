@@ -52,6 +52,7 @@ pub struct UiFrame<'a> {
 
 pub fn draw(frame: &mut Frame<'_>, model: &UiFrame<'_>) {
     let area = frame.area();
+    frame.render_widget(Clear, area); // Clear entire screen buffer to avoid overlap leaks
     
     if model.screen == ScreenKind::Desktop && model.full_screen {
         if let Some(desktop) = model.desktop {
