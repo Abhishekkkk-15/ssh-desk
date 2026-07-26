@@ -2,6 +2,7 @@
 
 **Remote operating-system shell in the terminal** — not just an SSH host list.
 
+
 Connect to a host and work in a tiled desktop of panes: interactive shell, SFTP files, viewer, editor, transfer queue, and process list. Multi-host sessions, encrypted vault, TOFU host keys, session restore, clipboard, and drag-and-drop are built in.
 
 | | |
